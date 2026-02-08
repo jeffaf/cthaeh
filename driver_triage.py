@@ -201,6 +201,51 @@ def check_dangerous_operations(imports):
     return findings
 
 
+def check_byovd_potential(imports):
+    """Check for BYOVD process killer capability."""
+    findings = []
+    
+    # Process handle acquisition
+    openers = {"zwopenprocess", "ntopenprocess", "obopenaobjectbypointer", "pslookupprocessbyprocessid"}
+    # Process termination
+    terminators = {"zwterminateprocess", "ntterminateprocess"}
+    
+    has_opener = bool(imports & openers)
+    has_terminator = bool(imports & terminators)
+    
+    if has_opener and has_terminator:
+        opener_names = [i for i in imports if i in openers]
+        terminator_names = [i for i in imports if i in terminators]
+        findings.append({
+            "check": "byovd_process_killer",
+            "detail": "BYOVD candidate: has %s + %s (can open and kill processes)" % (
+                ", ".join(opener_names), ", ".join(terminator_names)),
+            "score": 20
+        })
+    
+    return findings
+
+
+def check_physical_memory(imports):
+    """Check for physical memory R/W capability."""
+    findings = []
+    
+    phys_indicators = {
+        "mmmapiospace", "zwmapviewofsection", "mmmaplockedpagesspecifycache",
+        "zwopensection",
+    }
+    
+    found = imports & phys_indicators
+    if len(found) >= 2:
+        findings.append({
+            "check": "physical_memory_rw",
+            "detail": "Multiple physical memory mapping imports: %s" % ", ".join(found),
+            "score": 15
+        })
+    
+    return findings
+
+
 def check_device_interface(strings):
     """Check for device interface GUIDs and named devices."""
     findings = []
@@ -210,7 +255,7 @@ def check_device_interface(strings):
             findings.append({
                 "check": "named_device",
                 "detail": "Creates named device: %s" % s[:80],
-                "score": 10
+                "score": 15
             })
             break
     
@@ -283,6 +328,8 @@ def run():
     all_findings.extend(check_validation(imports))
     all_findings.extend(check_pool_operations(imports))
     all_findings.extend(check_dangerous_operations(imports))
+    all_findings.extend(check_byovd_potential(imports))
+    all_findings.extend(check_physical_memory(imports))
     all_findings.extend(check_device_interface(strings))
     all_findings.extend(check_hvci_compat(program))
     

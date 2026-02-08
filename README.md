@@ -73,11 +73,32 @@ python run_triage.py --single C:\path\to\suspicious.sys --ghidra C:\ghidra_11.3
 | Pre-filter + sequential | ~15 hours | Fewer drivers to analyze |
 | Pre-filter + 4 workers | ~4 hours | Recommended for most systems |
 
+## BYOVD & LOLDrivers
+
+Cthaeh has built-in support for BYOVD (Bring Your Own Vulnerable Driver) hunting:
+
+```bash
+# Show only BYOVD process killer candidates
+python prefilter.py C:\drivers\extracted --byovd --list
+
+# Cross-reference against LOLDrivers known-vulnerable database
+python prefilter.py C:\drivers\extracted --loldrivers --list
+
+# Combine: find NEW BYOVD candidates not yet in LOLDrivers
+python prefilter.py C:\drivers\extracted --byovd --loldrivers --list
+```
+
+The pre-filter detects:
+- 🎯 **BYOVD candidates**: Drivers that import both process open + terminate functions
+- 🔓 **Physical memory R/W**: Multiple memory mapping imports (potential arbitrary R/W)
+- ⚠️ **Known vulnerable**: Hashes matching the [LOLDrivers](https://www.loldrivers.io/) database
+
 ## Requirements
 
 - Python 3.8+
 - Ghidra 10.x+ (headless mode)
 - `pefile` (optional, for pre-filter): `pip install pefile`
+- `requests` (optional, for LOLDrivers cross-reference): `pip install requests`
 - Windows (for DriverStore extraction; analysis works on any OS)
 
 ## The Workflow
