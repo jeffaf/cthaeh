@@ -6,7 +6,16 @@ Feeds .sys files through Ghidra headless analysis with driver_triage.py,
 collects scores, and outputs a ranked CSV.
 
 Usage:
+    # Basic scan
     python run_triage.py --drivers-dir C:\\drivers --ghidra C:\\ghidra_11.3
+
+    # With pre-filter (fast, skips uninteresting drivers)
+    python run_triage.py --drivers-dir C:\\drivers --ghidra C:\\ghidra_11.3 --prefilter
+
+    # Parallel (4 workers)
+    python run_triage.py --drivers-dir C:\\drivers --ghidra C:\\ghidra_11.3 --prefilter --workers 4
+
+    # Single driver
     python run_triage.py --single C:\\path\\to\\driver.sys --ghidra C:\\ghidra_11.3
 """
 
@@ -18,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -31,8 +41,17 @@ def find_sys_files(directory):
     return sys_files
 
 
-def run_ghidra_analysis(ghidra_path, driver_path, script_path, project_dir):
-    """Run Ghidra headless analysis on a single driver."""
+def run_ghidra_analysis(args_tuple):
+    """Run Ghidra headless analysis on a single driver.
+    
+    Takes a tuple for ProcessPoolExecutor compatibility:
+    (ghidra_path, driver_path, script_path, project_dir, worker_id)
+    """
+    ghidra_path, driver_path, script_path, project_base, worker_id = args_tuple
+    
+    # Each worker gets its own project directory to avoid conflicts
+    project_dir = os.path.join(project_base, f"worker_{worker_id}")
+    os.makedirs(project_dir, exist_ok=True)
     
     if sys.platform == "win32":
         headless = os.path.join(ghidra_path, "support", "analyzeHeadless.bat")
@@ -40,8 +59,7 @@ def run_ghidra_analysis(ghidra_path, driver_path, script_path, project_dir):
         headless = os.path.join(ghidra_path, "support", "analyzeHeadless")
     
     if not os.path.exists(headless):
-        print(f"ERROR: Ghidra headless not found at {headless}")
-        return None
+        return None, f"Ghidra headless not found at {headless}"
     
     driver_name = Path(driver_path).stem
     
@@ -67,19 +85,29 @@ def run_ghidra_analysis(ghidra_path, driver_path, script_path, project_dir):
         for output in [result.stdout, result.stderr]:
             if "===TRIAGE_START===" in output and "===TRIAGE_END===" in output:
                 json_str = output.split("===TRIAGE_START===")[1].split("===TRIAGE_END===")[0].strip()
-                return json.loads(json_str)
+                return json.loads(json_str), None
         
-        print(f"  WARNING: No triage output for {driver_name}")
-        return None
+        return None, "no triage output"
             
     except subprocess.TimeoutExpired:
-        print(f"  TIMEOUT: {driver_name} took >5 minutes, skipping")
-        return None
+        return None, "timeout (>5min)"
     except json.JSONDecodeError as e:
-        print(f"  ERROR: Bad JSON from {driver_name}: {e}")
-        return None
+        return None, f"bad JSON: {e}"
     except Exception as e:
-        print(f"  ERROR: {driver_name}: {e}")
+        return None, str(e)
+
+
+def run_prefilter(drivers_dir, max_size_mb=5):
+    """Run the pefile pre-filter to eliminate uninteresting drivers."""
+    try:
+        from prefilter import prefilter_directory
+        max_bytes = max_size_mb * 1024 * 1024
+        results = prefilter_directory(drivers_dir, max_bytes)
+        return [d["path"] for d in results["analyze"]]
+    except ImportError:
+        print("WARNING: prefilter.py not found or pefile not installed.")
+        print("  Install: pip install pefile")
+        print("  Falling back to full scan.\n")
         return None
 
 
@@ -135,9 +163,78 @@ def print_summary(results):
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
     if results:
         print("Top targets:")
-        for i, r in enumerate(results[:10], 1):
+        for i, r in enumerate(results[:15], 1):
             driver = r.get("driver", {})
             print(f"  {i:2d}. [{r.get('priority', '?'):6s}] {r.get('score', 0):3d} pts  {driver.get('name', '?')}")
+
+
+def run_sequential(drivers, ghidra_path, script_path, project_dir):
+    """Run analysis sequentially (original behavior)."""
+    results = []
+    
+    for i, driver_path in enumerate(drivers, 1):
+        driver_name = os.path.basename(driver_path)
+        print(f"[{i}/{len(drivers)}] {driver_name}...", end="", flush=True)
+        
+        args_tuple = (ghidra_path, driver_path, script_path, project_dir, 0)
+        result, error = run_ghidra_analysis(args_tuple)
+        
+        if result:
+            results.append(result)
+            score = result.get("score", 0)
+            priority = result.get("priority", "?")
+            print(f" {priority} ({score} pts)")
+        else:
+            print(f" FAILED ({error})")
+    
+    return results
+
+
+def run_parallel(drivers, ghidra_path, script_path, project_dir, workers):
+    """Run analysis in parallel with multiple Ghidra instances."""
+    results = []
+    failed = 0
+    completed = 0
+    total = len(drivers)
+    
+    # Build args tuples with worker IDs (round-robin assignment)
+    args_list = [
+        (ghidra_path, driver_path, script_path, project_dir, i % workers)
+        for i, driver_path in enumerate(drivers)
+    ]
+    
+    print(f"Running with {workers} parallel workers...\n")
+    
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        # Submit all jobs
+        future_to_driver = {
+            executor.submit(run_ghidra_analysis, args): args[1]
+            for args in args_list
+        }
+        
+        for future in as_completed(future_to_driver):
+            driver_path = future_to_driver[future]
+            driver_name = os.path.basename(driver_path)
+            completed += 1
+            
+            try:
+                result, error = future.result()
+                if result:
+                    results.append(result)
+                    score = result.get("score", 0)
+                    priority = result.get("priority", "?")
+                    print(f"[{completed}/{total}] {driver_name}... {priority} ({score} pts)")
+                else:
+                    failed += 1
+                    print(f"[{completed}/{total}] {driver_name}... FAILED ({error})")
+            except Exception as e:
+                failed += 1
+                print(f"[{completed}/{total}] {driver_name}... ERROR ({e})")
+    
+    if failed:
+        print(f"\n{failed} driver(s) failed analysis")
+    
+    return results
 
 
 def main():
@@ -149,6 +246,12 @@ def main():
     parser.add_argument("--ghidra", required=True, help="Path to Ghidra installation")
     parser.add_argument("--output", default="triage_results.csv", help="Output CSV path")
     parser.add_argument("--max", type=int, default=0, help="Max drivers to analyze (0=all)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Parallel Ghidra instances (default: 1)")
+    parser.add_argument("--prefilter", action="store_true",
+                        help="Run pefile pre-filter to skip uninteresting drivers")
+    parser.add_argument("--max-size", type=int, default=5,
+                        help="Max driver size in MB for pre-filter (default: 5)")
     
     args = parser.parse_args()
     
@@ -161,11 +264,22 @@ def main():
         print(f"ERROR: Triage script not found at {script_path}")
         sys.exit(1)
     
+    # Find drivers
     if args.single:
         drivers = [args.single]
     else:
-        print(f"Scanning {args.drivers_dir} for .sys files...")
-        drivers = find_sys_files(args.drivers_dir)
+        # Pre-filter if requested
+        if args.prefilter:
+            print(f"Running pre-filter on {args.drivers_dir}...")
+            filtered = run_prefilter(args.drivers_dir, args.max_size)
+            if filtered is not None:
+                drivers = filtered
+            else:
+                print(f"Scanning {args.drivers_dir} for .sys files...")
+                drivers = find_sys_files(args.drivers_dir)
+        else:
+            print(f"Scanning {args.drivers_dir} for .sys files...")
+            drivers = find_sys_files(args.drivers_dir)
     
     if not drivers:
         print("No .sys files found!")
@@ -176,24 +290,16 @@ def main():
     
     print(f"🌳 Cthaeh sees {len(drivers)} driver(s)\n")
     
+    # Create temp project directory for Ghidra
     project_dir = tempfile.mkdtemp(prefix="cthaeh_")
     
-    results = []
     start_time = time.time()
     
-    for i, driver_path in enumerate(drivers, 1):
-        driver_name = os.path.basename(driver_path)
-        print(f"[{i}/{len(drivers)}] {driver_name}...", end="", flush=True)
-        
-        result = run_ghidra_analysis(args.ghidra, driver_path, script_path, project_dir)
-        
-        if result:
-            results.append(result)
-            score = result.get("score", 0)
-            priority = result.get("priority", "?")
-            print(f" {priority} ({score} pts)")
-        else:
-            print(" FAILED")
+    # Run analysis
+    if args.workers > 1 and len(drivers) > 1:
+        results = run_parallel(drivers, args.ghidra, script_path, project_dir, args.workers)
+    else:
+        results = run_sequential(drivers, args.ghidra, script_path, project_dir)
     
     elapsed = time.time() - start_time
     
@@ -203,6 +309,7 @@ def main():
     
     print(f"\nCompleted in {elapsed:.1f}s ({elapsed/max(len(drivers),1):.1f}s per driver)")
     
+    # Cleanup
     try:
         import shutil
         shutil.rmtree(project_dir, ignore_errors=True)
