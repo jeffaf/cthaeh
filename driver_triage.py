@@ -548,6 +548,166 @@ def check_internal_validation(imports):
     return findings
 
 
+# --- Vendor / driver class context checks ---
+
+# CNA vendors with bounty programs (high-value targets)
+CNA_BOUNTY_VENDORS = {
+    "qualcomm": {"cna": True, "bounty": True},
+    "broadcom": {"cna": True, "bounty": True},
+    "intel": {"cna": True, "bounty": True},
+    "samsung": {"cna": True, "bounty": True},
+    "mediatek": {"cna": True, "bounty": True},
+    "nvidia": {"cna": True, "bounty": True},
+    "amd": {"cna": True, "bounty": False},
+    "asus": {"cna": True, "bounty": False},
+    "lenovo": {"cna": True, "bounty": False},
+    "dell": {"cna": True, "bounty": False},
+    "hp": {"cna": True, "bounty": False},
+}
+
+# Driver name patterns for WiFi drivers (massive attack surface, historically rich in vulns)
+WIFI_DRIVER_PATTERNS = [
+    "wifi", "wlan", "atheros", "athw", "ath6", "ath1",
+    "bcmwl", "bcm43", "rtlwlan", "rtwlan", "rtl8",
+    "mtkwl", "mt76", "qcwlan", "qcalwifi",
+    "nwifi", "netwlan", "iwl", "iwifi",
+    "brcmfmac", "brcmsmac",
+]
+
+# Audio driver patterns (typically low attack surface, flag low)
+AUDIO_DRIVER_PATTERNS = [
+    "realtek", "rtkvhd", "rtkaudibus", "portcls",
+    "hdaudio", "hdaud", "vstxraul", "vsfx",
+    "nahimic", "a]volute", "dtsapo", "synaudio",
+    "maxxaudio", "dolbyapo",
+]
+
+# Windows inbox driver patterns (well-audited, lower priority)
+INBOX_DRIVER_PATTERNS = [
+    "ntfs", "ndis", "tcpip", "http", "fltmgr",
+    "volmgr", "storport", "pci", "acpi",
+    "wdf01000", "ksecdd", "cng",
+]
+
+
+def check_vendor_context(strings, driver_name):
+    """Score based on vendor CNA status and bounty availability."""
+    findings = []
+    driver_lower = driver_name.lower()
+    all_text = " ".join(strings).lower() + " " + driver_lower
+    
+    matched_vendor = None
+    for vendor, info in CNA_BOUNTY_VENDORS.items():
+        if vendor in all_text:
+            matched_vendor = (vendor, info)
+            break
+    
+    if matched_vendor:
+        vendor_name, info = matched_vendor
+        if info["cna"] and info["bounty"]:
+            findings.append({
+                "check": "vendor_cna_bounty",
+                "detail": "Vendor %s is CNA with bounty program (high-value disclosure target)" % vendor_name.title(),
+                "score": 20
+            })
+        elif info["cna"]:
+            findings.append({
+                "check": "vendor_cna",
+                "detail": "Vendor %s is CNA (easier CVE assignment path)" % vendor_name.title(),
+                "score": 10
+            })
+    
+    return findings
+
+
+def check_driver_class(strings, driver_name):
+    """Classify driver type and adjust score accordingly."""
+    findings = []
+    driver_lower = driver_name.lower()
+    
+    # WiFi drivers - massive IOCTL/WDI surface, historically vuln-rich
+    for pattern in WIFI_DRIVER_PATTERNS:
+        if pattern in driver_lower:
+            findings.append({
+                "check": "wifi_driver",
+                "detail": "WiFi driver (matched '%s') - massive IOCTL/WDI attack surface, historically rich in vulns" % pattern,
+                "score": 15
+            })
+            return findings
+    
+    # Audio drivers - typically tiny IOCTL surface, low priority
+    for pattern in AUDIO_DRIVER_PATTERNS:
+        if pattern in driver_lower:
+            findings.append({
+                "check": "audio_class_driver",
+                "detail": "Audio class driver (matched '%s') - typically minimal IOCTL attack surface" % pattern,
+                "score": -15
+            })
+            return findings
+    
+    # Windows inbox drivers - well-audited by Microsoft
+    for pattern in INBOX_DRIVER_PATTERNS:
+        if pattern in driver_lower:
+            findings.append({
+                "check": "windows_inbox_driver",
+                "detail": "Windows inbox driver (matched '%s') - well-audited by Microsoft" % pattern,
+                "score": -10
+            })
+            return findings
+    
+    return findings
+
+
+def check_large_ioctl_surface(program):
+    """Detect drivers with many distinct IOCTL codes (large attack surface)."""
+    findings = []
+    listing = program.getListing()
+    func_mgr = program.getFunctionManager()
+    
+    ioctl_codes = set()
+    
+    for func in func_mgr.getFunctions(True):
+        body = func.getBody()
+        inst_iter = listing.getInstructions(body, True)
+        while inst_iter.hasNext():
+            inst = inst_iter.next()
+            for i in range(inst.getNumOperands()):
+                try:
+                    scalar = inst.getScalar(i)
+                    if scalar is None:
+                        continue
+                    val = scalar.getUnsignedValue()
+                    # IOCTL codes: DeviceType(16) | Access(2) | Function(12) | Method(2)
+                    if val > 0x10000 and val < 0xFFFFFFFF:
+                        device_type = (val >> 16) & 0xFFFF
+                        # Reasonable device type range
+                        if device_type < 0x100:
+                            ioctl_codes.add(val)
+                except:
+                    pass
+    
+    if len(ioctl_codes) > 20:
+        findings.append({
+            "check": "massive_ioctl_surface",
+            "detail": "Massive IOCTL surface: %d distinct codes detected" % len(ioctl_codes),
+            "score": 15
+        })
+    elif len(ioctl_codes) > 10:
+        findings.append({
+            "check": "large_ioctl_surface",
+            "detail": "Large IOCTL surface: %d distinct codes detected" % len(ioctl_codes),
+            "score": 10
+        })
+    elif len(ioctl_codes) > 4:
+        findings.append({
+            "check": "moderate_ioctl_surface",
+            "detail": "Moderate IOCTL surface: %d distinct codes detected" % len(ioctl_codes),
+            "score": 5
+        })
+    
+    return findings
+
+
 def check_device_interface(strings):
     """Check for device interface GUIDs and named devices."""
     findings = []
@@ -648,6 +808,10 @@ def run():
     all_findings.extend(check_thin_driver(program, imports))
     all_findings.extend(check_unchecked_copy(imports, program))
     all_findings.extend(check_internal_validation(imports))
+    # New checks (v3.2 - vendor/class context)
+    all_findings.extend(check_vendor_context(strings, driver_info.get("name", "")))
+    all_findings.extend(check_driver_class(strings, driver_info.get("name", "")))
+    all_findings.extend(check_large_ioctl_surface(program))
     
     total_score = sum(f["score"] for f in all_findings)
     
