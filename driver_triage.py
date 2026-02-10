@@ -106,10 +106,12 @@ def check_buffer_methods(program):
                     pass
     
     if method_neither_count > 0:
+        # Scale score: 15 base + 3 per additional (cap at 30)
+        score = min(15 + (method_neither_count - 1) * 3, 30)
         findings.append({
             "check": "method_neither",
             "detail": "Found %d potential METHOD_NEITHER IOCTLs (raw user pointers)" % method_neither_count,
-            "score": 15
+            "score": score
         })
     
     if method_buffered_count > 0:
@@ -120,10 +122,12 @@ def check_buffer_methods(program):
         })
     
     if file_any_access_count > 0:
+        # Scale: 15 base + 2 per additional (cap at 25)
+        score = min(15 + (file_any_access_count - 1) * 2, 25)
         findings.append({
             "check": "file_any_access",
             "detail": "Found %d IOCTLs with FILE_ANY_ACCESS (no privilege check)" % file_any_access_count,
-            "score": 15
+            "score": score
         })
     
     return findings
@@ -447,6 +451,103 @@ def check_registry_kernel(imports):
     return findings
 
 
+def check_irp_forwarding(imports):
+    """Check for IRP forwarding to other drivers (expanded attack surface)."""
+    findings = []
+    
+    if "iofcalldriver" in imports or "iocalldriver" in imports:
+        findings.append({
+            "check": "irp_forwarding",
+            "detail": "Forwards IRPs to other drivers (IoCallDriver/IofCallDriver) - expanded attack surface",
+            "score": 5
+        })
+    
+    return findings
+
+
+def check_thin_driver(program, imports):
+    """Small drivers with IOCTLs = thin wrapper, likely minimal validation."""
+    findings = []
+    
+    code_size = program.getMemory().getSize()
+    has_irp = "iofcompleterequest" in imports or "iocompleterequest" in imports
+    func_count = program.getFunctionManager().getFunctionCount()
+    
+    if has_irp and code_size < 8192:  # < 8KB
+        findings.append({
+            "check": "thin_driver_critical",
+            "detail": "Very small driver (%d bytes) with IRP handling and only %d functions - minimal validation likely" % (code_size, func_count),
+            "score": 15
+        })
+    elif has_irp and code_size < 16384:  # < 16KB
+        findings.append({
+            "check": "thin_driver",
+            "detail": "Small driver (%d bytes) with IRP handling and %d functions - limited room for validation" % (code_size, func_count),
+            "score": 8
+        })
+    
+    return findings
+
+
+def check_unchecked_copy(imports, program):
+    """Detect memcpy/RtlCopyMemory near IOCTL handling without size validation.
+    
+    Heuristic: if driver imports copy functions + IRP handling but no
+    ProbeForRead/ProbeForWrite and no ExAllocatePoolWithQuotaTag (size-checked alloc),
+    the copy sizes are likely user-controlled.
+    """
+    findings = []
+    
+    copy_funcs = {"rtlcopymemory", "memcpy", "memmove", "rtlmovememory"}
+    has_copy = bool(imports & copy_funcs)
+    has_irp = "iofcompleterequest" in imports or "iocompleterequest" in imports
+    has_probe = "probeforread" in imports or "probeforwrite" in imports
+    has_quota_alloc = "exallocatepoolwithquotatag" in imports
+    
+    if has_copy and has_irp and not has_probe and not has_quota_alloc:
+        copy_names = [i for i in imports if i in copy_funcs]
+        findings.append({
+            "check": "unchecked_copy",
+            "detail": "CRITICAL: %s with IRP handling but no ProbeFor*/quota alloc - user-controlled sizes likely" % ", ".join(copy_names),
+            "score": 20
+        })
+    elif has_copy and has_irp and not has_probe:
+        copy_names = [i for i in imports if i in copy_funcs]
+        findings.append({
+            "check": "weak_copy_validation",
+            "detail": "%s with IRP handling, no ProbeFor* (has quota alloc) - partial validation" % ", ".join(copy_names),
+            "score": 10
+        })
+    
+    return findings
+
+
+def check_internal_validation(imports):
+    """Detect drivers with internal object validation (false positive reducer).
+    
+    Drivers that import linked-list and object validation functions are more
+    likely to have proper input validation, reducing exploitability.
+    """
+    findings = []
+    
+    validation_indicators = {
+        "exinterlockedinserthead", "exinterlockedinserttail",
+        "exinterlockedremovehead", "initializelisthead",
+        "rtlvalidateheap", "exacquirefastmutex",
+        "obreferenceobjectbyhandle", "obfreferenceobject",
+    }
+    
+    found = imports & validation_indicators
+    if len(found) >= 3:
+        findings.append({
+            "check": "has_internal_validation",
+            "detail": "Driver has internal object validation (%s) - may reduce exploitability" % ", ".join(list(found)[:4]),
+            "score": -10  # Negative score = reduces overall risk
+        })
+    
+    return findings
+
+
 def check_device_interface(strings):
     """Check for device interface GUIDs and named devices."""
     findings = []
@@ -542,6 +643,11 @@ def run():
     all_findings.extend(check_firmware_access(imports, strings))
     all_findings.extend(check_disk_access(strings))
     all_findings.extend(check_registry_kernel(imports))
+    # New checks (v3 - feedback refinements)
+    all_findings.extend(check_irp_forwarding(imports))
+    all_findings.extend(check_thin_driver(program, imports))
+    all_findings.extend(check_unchecked_copy(imports, program))
+    all_findings.extend(check_internal_validation(imports))
     
     total_score = sum(f["score"] for f in all_findings)
     
