@@ -146,6 +146,7 @@ def write_csv(results, output_path):
 def print_summary(results):
     """Print a quick summary to terminal."""
     total = len(results)
+    critical = sum(1 for r in results if r.get("priority") == "CRITICAL")
     high = sum(1 for r in results if r.get("priority") == "HIGH")
     medium = sum(1 for r in results if r.get("priority") == "MEDIUM")
     low = sum(1 for r in results if r.get("priority") == "LOW")
@@ -154,6 +155,7 @@ def print_summary(results):
     print(f"\n{'='*60}")
     print(f"  🌳 CTHAEH TRIAGE COMPLETE: {total} drivers analyzed")
     print(f"{'='*60}")
+    print(f"  💀 CRITICAL:        {critical}")
     print(f"  🔴 HIGH priority:   {high}")
     print(f"  🟡 MEDIUM priority: {medium}")
     print(f"  🟢 LOW priority:    {low}")
@@ -163,7 +165,7 @@ def print_summary(results):
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
     if results:
         print("Top targets:")
-        for i, r in enumerate(results[:15], 1):
+        for i, r in enumerate(results[:20], 1):
             driver = r.get("driver", {})
             print(f"  {i:2d}. [{r.get('priority', '?'):6s}] {r.get('score', 0):3d} pts  {driver.get('name', '?')}")
 

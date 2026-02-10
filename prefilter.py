@@ -71,6 +71,54 @@ PHYS_MEM_INDICATORS = {
     "ZwOpenPhysicalMemory",  # rare but critical
 }
 
+# Token stealing / EPROCESS manipulation indicators
+TOKEN_STEAL_IMPORTS = {
+    "PsLookupProcessByProcessId",
+    "PsReferencePrimaryToken",
+    "SePrivilegeCheck",
+    "ZwOpenProcessTokenEx",
+    "NtOpenProcessToken",
+}
+
+# Registry manipulation from kernel (persistence vector)
+REGISTRY_IMPORTS = {
+    "ZwCreateKey",
+    "ZwSetValueKey",
+    "ZwOpenKey",
+    "ZwDeleteKey",
+}
+
+# DSE bypass related strings (checked in string scan, not imports)
+DSE_STRINGS = {
+    "CI.dll",
+    "g_CiOptions",
+    "CiValidateImageHeader",
+    "CiInitialize",
+}
+
+# WinIO/WinRing0 codebase indicators (strings)
+WINIO_STRINGS = {
+    "WinIo",
+    "WinRing0",
+    "\\Device\\WinIo",
+    "\\DosDevices\\WinRing0",
+    "\\Device\\WinRing0",
+    "WINIO_MAPPHYSTOLIN",
+}
+
+# Firmware/SPI flash access indicators
+FIRMWARE_IMPORTS = {
+    "HalGetBusDataByOffset",
+    "HalSetBusDataByOffset",
+}
+
+# Disk direct access strings
+DISK_ACCESS_STRINGS = {
+    "\\Device\\Harddisk",
+    "PhysicalDrive",
+    "RawDisk",
+}
+
 # Skip drivers larger than this (huge drivers = slow Ghidra analysis)
 MAX_SIZE_BYTES = 5 * 1024 * 1024  # 5MB default
 
@@ -215,6 +263,27 @@ def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_name
     if "MmMapIoSpace" in imports:
         if "PHYS_MEM_RW" not in flags:
             flags.append("MMIO_MAP")
+
+    # Token stealing / EPROCESS manipulation
+    token_imports = imports & TOKEN_STEAL_IMPORTS
+    if len(token_imports) >= 2:
+        flags.append("TOKEN_STEAL")
+        high_risk_count += 2
+    elif "PsLookupProcessByProcessId" in imports:
+        flags.append("PROCESS_LOOKUP")
+        high_risk_count += 1
+
+    # Registry manipulation from kernel
+    reg_imports = imports & REGISTRY_IMPORTS
+    if len(reg_imports) >= 2:
+        flags.append("REGISTRY_RW")
+        high_risk_count += 1
+
+    # Firmware/SPI access
+    fw_imports = imports & FIRMWARE_IMPORTS
+    if fw_imports:
+        flags.append("FIRMWARE_ACCESS")
+        high_risk_count += 2
 
     return True, "has attack surface", high_risk_count, flags
 
