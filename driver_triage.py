@@ -106,29 +106,41 @@ def check_buffer_methods(program):
                     pass
     
     if method_neither_count > 0:
-        # Scale score: 15 base + 3 per additional (cap at 30)
-        score = min(15 + (method_neither_count - 1) * 3, 30)
-        findings.append({
-            "check": "method_neither",
-            "detail": "Found %d potential METHOD_NEITHER IOCTLs (raw user pointers)" % method_neither_count,
-            "score": score
-        })
+        # Fires on 100% of drivers - only score if unusually high count
+        if method_neither_count > 10:
+            findings.append({
+                "check": "method_neither_heavy",
+                "detail": "Found %d potential METHOD_NEITHER IOCTLs (raw user pointers) - unusually high" % method_neither_count,
+                "score": 10
+            })
+        else:
+            findings.append({
+                "check": "method_neither",
+                "detail": "Found %d potential METHOD_NEITHER IOCTLs (raw user pointers)" % method_neither_count,
+                "score": 0  # Informational only - fires on everything
+            })
     
     if method_buffered_count > 0:
         findings.append({
             "check": "method_buffered",
             "detail": "Found %d potential METHOD_BUFFERED IOCTLs" % method_buffered_count,
-            "score": 5
+            "score": 0  # Informational only - fires on everything
         })
     
     if file_any_access_count > 0:
-        # Scale: 15 base + 2 per additional (cap at 25)
-        score = min(15 + (file_any_access_count - 1) * 2, 25)
-        findings.append({
-            "check": "file_any_access",
-            "detail": "Found %d IOCTLs with FILE_ANY_ACCESS (no privilege check)" % file_any_access_count,
-            "score": score
-        })
+        # Fires on 100% - only score if unusually high count
+        if file_any_access_count > 10:
+            findings.append({
+                "check": "file_any_access_heavy",
+                "detail": "Found %d IOCTLs with FILE_ANY_ACCESS (no privilege check) - unusually high" % file_any_access_count,
+                "score": 10
+            })
+        else:
+            findings.append({
+                "check": "file_any_access",
+                "detail": "Found %d IOCTLs with FILE_ANY_ACCESS (no privilege check)" % file_any_access_count,
+                "score": 0  # Informational only - fires on everything
+            })
     
     return findings
 
@@ -168,7 +180,7 @@ def check_pool_operations(imports):
         findings.append({
             "check": "has_pool_operations",
             "detail": "Uses pool allocation: %s" % ", ".join(pool_funcs),
-            "score": 5
+            "score": 0  # Informational - fires on 88% of drivers
         })
     
     return findings
@@ -187,11 +199,11 @@ def check_dangerous_operations(imports):
         "memcpy": ("memcpy_present", "memcpy - potential overflow if sizes unchecked", 5),
         "memmove": ("memmove_present", "memmove present", 3),
         "obregisterobjectbyname": ("object_reference", "Can reference arbitrary kernel objects", 10),
-        "mmgetsystemroutineaddress": ("dynamic_resolve", "Dynamically resolves kernel functions", 5),
+        "mmgetsystemroutineaddress": ("dynamic_resolve", "Dynamically resolves kernel functions", 0),  # 66% fire rate
         "zwcreatefile": ("file_operations", "Can create/open files from kernel", 5),
         "zwwritefile": ("file_write", "Can write files from kernel", 5),
         "zwreadfile": ("file_read", "Can read files from kernel", 5),
-        "iowmiregistrationcontrol": ("wmi_provider", "WMI provider - additional attack surface", 5),
+        "iowmiregistrationcontrol": ("wmi_provider", "WMI provider - additional attack surface", 0),  # 64% fire rate
     }
     
     for func_name, (check_id, detail, score) in dangerous.items():
@@ -396,17 +408,8 @@ def check_firmware_access(imports, strings):
             "score": 15
         })
     
-    fw_strings = ["spi", "bios", "firmware", "smbus", "smbios"]
-    for s in strings:
-        s_lower = s.lower()
-        for fs in fw_strings:
-            if fs in s_lower and len(s) < 100:
-                findings.append({
-                    "check": "firmware_string",
-                    "detail": "Firmware-related string: %s" % s[:60],
-                    "score": 5
-                })
-                return findings
+    # firmware_string removed - fires on 83% of drivers (too noisy)
+    # Only the import-based firmware_bus_access check remains (2% fire rate)
     
     return findings
 
@@ -459,7 +462,7 @@ def check_irp_forwarding(imports):
         findings.append({
             "check": "irp_forwarding",
             "detail": "Forwards IRPs to other drivers (IoCallDriver/IofCallDriver) - expanded attack surface",
-            "score": 5
+            "score": 0  # Informational - fires on 58% of drivers
         })
     
     return findings
@@ -686,19 +689,19 @@ def check_large_ioctl_surface(program):
                 except:
                     pass
     
-    if len(ioctl_codes) > 20:
+    if len(ioctl_codes) > 50:
         findings.append({
             "check": "massive_ioctl_surface",
             "detail": "Massive IOCTL surface: %d distinct codes detected" % len(ioctl_codes),
             "score": 15
         })
-    elif len(ioctl_codes) > 10:
+    elif len(ioctl_codes) > 25:
         findings.append({
             "check": "large_ioctl_surface",
             "detail": "Large IOCTL surface: %d distinct codes detected" % len(ioctl_codes),
             "score": 10
         })
-    elif len(ioctl_codes) > 4:
+    elif len(ioctl_codes) > 10:
         findings.append({
             "check": "moderate_ioctl_surface",
             "detail": "Moderate IOCTL surface: %d distinct codes detected" % len(ioctl_codes),
@@ -817,11 +820,11 @@ def run():
     
     if total_score >= 120:
         priority = "CRITICAL"
-    elif total_score >= 80:
+    elif total_score >= 85:
         priority = "HIGH"
-    elif total_score >= 50:
+    elif total_score >= 55:
         priority = "MEDIUM"
-    elif total_score >= 25:
+    elif total_score >= 30:
         priority = "LOW"
     else:
         priority = "SKIP"
