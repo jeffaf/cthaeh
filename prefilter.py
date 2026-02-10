@@ -137,7 +137,7 @@ def load_loldrivers_hashes(force_refresh=False):
                 cache = json.load(f)
             # Cache valid for 7 days
             if time.time() - cache.get("fetched", 0) < 7 * 86400:
-                return cache.get("hashes", set()), cache.get("names", {})
+                return set(cache.get("hashes", [])), cache.get("names", {})
         except:
             pass
 

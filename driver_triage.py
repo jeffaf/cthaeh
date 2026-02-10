@@ -94,14 +94,17 @@ def check_buffer_methods(program):
                     val = scalar.getUnsignedValue()
                     # IOCTL codes: DeviceType(16) | Access(2) | Function(12) | Method(2)
                     if val > 0x10000 and val < 0xFFFFFFFF:
-                        method = val & 0x3
-                        access = (val >> 14) & 0x3
-                        if method == 3:
-                            method_neither_count += 1
-                        elif method == 0:
-                            method_buffered_count += 1
-                        if access == 0:  # FILE_ANY_ACCESS
-                            file_any_access_count += 1
+                        device_type = (val >> 16) & 0xFFFF
+                        # Filter: valid device types are <0x100 (MS) or 0x8000+ (vendor)
+                        if device_type < 0x100 or device_type >= 0x8000:
+                            method = val & 0x3
+                            access = (val >> 14) & 0x3
+                            if method == 3:
+                                method_neither_count += 1
+                            elif method == 0:
+                                method_buffered_count += 1
+                            if access == 0:  # FILE_ANY_ACCESS
+                                file_any_access_count += 1
                 except:
                     pass
     
@@ -198,7 +201,7 @@ def check_dangerous_operations(imports):
         "rtlcopymemory": ("memcpy_present", "RtlCopyMemory - potential overflow if sizes unchecked", 5),
         "memcpy": ("memcpy_present", "memcpy - potential overflow if sizes unchecked", 5),
         "memmove": ("memmove_present", "memmove present", 3),
-        "obregisterobjectbyname": ("object_reference", "Can reference arbitrary kernel objects", 10),
+        "obreferenceobjectbyname": ("object_reference", "Can reference arbitrary kernel objects", 10),
         "mmgetsystemroutineaddress": ("dynamic_resolve", "Dynamically resolves kernel functions", 0),  # 66% fire rate
         "zwcreatefile": ("file_operations", "Can create/open files from kernel", 5),
         "zwwritefile": ("file_write", "Can write files from kernel", 5),
@@ -599,10 +602,11 @@ def check_vendor_context(strings, driver_name):
     driver_lower = driver_name.lower()
     all_text = " ".join(strings).lower() + " " + driver_lower
     
+    # Use sorted keys for deterministic matching across Jython/CPython
     matched_vendor = None
-    for vendor, info in CNA_BOUNTY_VENDORS.items():
+    for vendor in sorted(CNA_BOUNTY_VENDORS.keys()):
         if vendor in all_text:
-            matched_vendor = (vendor, info)
+            matched_vendor = (vendor, CNA_BOUNTY_VENDORS[vendor])
             break
     
     if matched_vendor:
@@ -683,8 +687,8 @@ def check_large_ioctl_surface(program):
                     # IOCTL codes: DeviceType(16) | Access(2) | Function(12) | Method(2)
                     if val > 0x10000 and val < 0xFFFFFFFF:
                         device_type = (val >> 16) & 0xFFFF
-                        # Reasonable device type range
-                        if device_type < 0x100:
+                        # Valid device types: <0x100 (MS defined) or >=0x8000 (vendor)
+                        if device_type < 0x100 or device_type >= 0x8000:
                             ioctl_codes.add(val)
                 except:
                     pass
@@ -737,11 +741,9 @@ def check_device_interface(strings):
     return findings
 
 
-def check_hvci_compat(program):
+def check_hvci_compat(imports):
     """Check if driver is HVCI compatible."""
     findings = []
-    
-    imports = get_imports(program)
     
     if "mmmapiospace" in imports:
         findings.append({
@@ -796,7 +798,7 @@ def run():
     all_findings.extend(check_byovd_potential(imports))
     all_findings.extend(check_physical_memory(imports))
     all_findings.extend(check_device_interface(strings))
-    all_findings.extend(check_hvci_compat(program))
+    all_findings.extend(check_hvci_compat(imports))
     # New checks (v2)
     all_findings.extend(check_msr_access(program))
     all_findings.extend(check_cr_access(program))
