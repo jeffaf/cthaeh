@@ -222,7 +222,7 @@ def check_byovd_potential(imports):
     findings = []
     
     # Process handle acquisition
-    openers = {"zwopenprocess", "ntopenprocess", "obopenaobjectbypointer", "pslookupprocessbyprocessid"}
+    openers = {"zwopenprocess", "ntopenprocess", "obopenobjectbypointer", "pslookupprocessbyprocessid"}
     # Process termination
     terminators = {"zwterminateprocess", "ntterminateprocess"}
     
@@ -537,7 +537,7 @@ def check_internal_validation(imports):
         "exinterlockedinserthead", "exinterlockedinserttail",
         "exinterlockedremovehead", "initializelisthead",
         "rtlvalidateheap", "exacquirefastmutex",
-        "obreferenceobjectbyhandle", "obfreferenceobject",
+        "obreferenceobjectbyhandle", "obdereferenceobject",
     }
     
     found = imports & validation_indicators
@@ -581,7 +581,7 @@ WIFI_DRIVER_PATTERNS = [
 AUDIO_DRIVER_PATTERNS = [
     "realtek", "rtkvhd", "rtkaudibus", "portcls",
     "hdaudio", "hdaud", "vstxraul", "vsfx",
-    "nahimic", "a]volute", "dtsapo", "synaudio",
+    "nahimic", "avolute", "dtsapo", "synaudio",
     "maxxaudio", "dolbyapo",
 ]
 
