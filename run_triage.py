@@ -111,6 +111,14 @@ def run_prefilter(drivers_dir, max_size_mb=5):
         return None
 
 
+def write_json(results, output_path):
+    """Write full results with all findings to JSON."""
+    results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    with open(output_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Full results (JSON) written to: {output_path}")
+
+
 def write_csv(results, output_path):
     """Write results to CSV, sorted by score descending."""
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
@@ -254,6 +262,7 @@ def main():
                         help="Run pefile pre-filter to skip uninteresting drivers")
     parser.add_argument("--max-size", type=int, default=5,
                         help="Max driver size in MB for pre-filter (default: 5)")
+    parser.add_argument("--json-output", help="Write full results with all findings to JSON file")
     
     args = parser.parse_args()
     
@@ -307,6 +316,8 @@ def main():
     
     if results:
         write_csv(results, args.output)
+        if args.json_output:
+            write_json(results, args.json_output)
         print_summary(results)
     
     print(f"\nCompleted in {elapsed:.1f}s ({elapsed/max(len(drivers),1):.1f}s per driver)")
