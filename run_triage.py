@@ -257,7 +257,7 @@ def write_report(results, output_path, top_n=20):
     medium = sum(1 for r in results if r.get("priority") == "MEDIUM")
     low = sum(1 for r in results if r.get("priority") == "LOW")
     skip = sum(1 for r in results if r.get("priority") == "SKIP")
-    known_fp = sum(1 for r in results if r.get("priority") == "INVESTIGATED")
+    investigated_count = sum(1 for r in results if r.get("priority") == "INVESTIGATED")
     
     PRIORITY_EMOJI = {
         "CRITICAL": "💀", "HIGH": "🔴", "MEDIUM": "🟡",
@@ -277,8 +277,8 @@ def write_report(results, output_path, top_n=20):
     lines.append(f"- 🟡 MEDIUM: {medium}")
     lines.append(f"- 🟢 LOW: {low}")
     lines.append(f"- ⚪ SKIP: {skip}")
-    if known_fp:
-        lines.append(f"- 🚫 Investigated: {known_fp}")
+    if investigated_count:
+        lines.append(f"- 🚫 Investigated: {investigated_count}")
     lines.append("")
     lines.append(f"## Top {top_n} Candidates")
     lines.append("")

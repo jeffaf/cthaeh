@@ -149,19 +149,19 @@ def get_weight(check_id):
 
 
 # --- Known FP / Skip List ---
-def load_known_fp():
+def load_investigated():
     """Load known false positives / already-investigated drivers."""
     candidates = []
     
     # 1. Ghidra's sourceFile (Jython scripting env)
     try:
-        candidates.append(os.path.join(os.path.dirname(os.path.abspath(sourceFile.getAbsolutePath())), "known_fp.json"))
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(sourceFile.getAbsolutePath())), "investigated.json"))
     except:
         pass
     
     # 2. Python __file__ (CPython / direct invocation)
     try:
-        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_fp.json"))
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "investigated.json"))
     except:
         pass
     
@@ -169,12 +169,12 @@ def load_known_fp():
     try:
         from ghidra.app.script import GhidraScriptUtil
         for d in GhidraScriptUtil.getScriptDirectories():
-            candidates.append(os.path.join(d.getAbsolutePath(), "known_fp.json"))
+            candidates.append(os.path.join(d.getAbsolutePath(), "investigated.json"))
     except:
         pass
     
     # 4. Current working directory
-    candidates.append(os.path.join(os.getcwd(), "known_fp.json"))
+    candidates.append(os.path.join(os.getcwd(), "investigated.json"))
     
     # 5. Environment variable override
     env_path = os.environ.get("CTHAEH_FP_PATH")
@@ -187,16 +187,16 @@ def load_known_fp():
                 data = json.load(f)
                 result = data.get("investigated", data.get("skip_drivers", {}))
                 if result:
-                    print("known_fp.json loaded from: %s (%d entries)" % (fp_path, len(result)))
+                    print("investigated.json loaded from: %s (%d entries)" % (fp_path, len(result)))
                     return result
         except:
             continue
     
-    print("WARNING: known_fp.json not found in any search path")
+    print("WARNING: investigated.json not found in any search path")
     return {}
 
 
-INVESTIGATED = load_known_fp()
+INVESTIGATED = load_investigated()
 
 
 def get_imports(program):
@@ -1632,7 +1632,7 @@ def run():
             "skip_reason": skip_reason,
             "findings_count": 0,
             "findings": [{
-                "check": "known_fp",
+                "check": "investigated_skip",
                 "detail": skip_reason,
                 "score": 0
             }],
