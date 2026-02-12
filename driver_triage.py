@@ -136,8 +136,8 @@ WEIGHTS = {
 
 # Scoring thresholds
 THRESHOLDS = {
-    "CRITICAL": 150,  # Raised from 120
-    "HIGH": 85,
+    "CRITICAL": 200,  # Raised from 150 (was 120). ~3% of drivers.
+    "HIGH": 120,      # Raised from 85. Former CRITICAL threshold.
     "MEDIUM": 55,
     "LOW": 30,
 }
