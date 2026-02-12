@@ -151,20 +151,50 @@ def get_weight(check_id):
 # --- Known FP / Skip List ---
 def load_known_fp():
     """Load known false positives / already-investigated drivers."""
-    # Try Ghidra's sourceFile first (Jython), then fall back to __file__ (CPython)
+    candidates = []
+    
+    # 1. Ghidra's sourceFile (Jython scripting env)
     try:
-        fp_path = os.path.join(os.path.dirname(os.path.abspath(sourceFile.getAbsolutePath())), "known_fp.json")
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(sourceFile.getAbsolutePath())), "known_fp.json"))
     except:
+        pass
+    
+    # 2. Python __file__ (CPython / direct invocation)
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_fp.json"))
+    except:
+        pass
+    
+    # 3. Ghidra script directories (getScriptDirectories if available)
+    try:
+        from ghidra.app.script import GhidraScriptUtil
+        for d in GhidraScriptUtil.getScriptDirectories():
+            candidates.append(os.path.join(d.getAbsolutePath(), "known_fp.json"))
+    except:
+        pass
+    
+    # 4. Current working directory
+    candidates.append(os.path.join(os.getcwd(), "known_fp.json"))
+    
+    # 5. Environment variable override
+    env_path = os.environ.get("CTHAEH_FP_PATH")
+    if env_path:
+        candidates.insert(0, env_path)
+    
+    for fp_path in candidates:
         try:
-            fp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_fp.json")
+            with open(fp_path, "r") as f:
+                data = json.load(f)
+                result = data.get("skip_drivers", {})
+                if result:
+                    # Print to stderr so it shows in Ghidra output
+                    print("known_fp.json loaded from: %s (%d entries)" % (fp_path, len(result)))
+                    return result
         except:
-            return {}
-    try:
-        with open(fp_path, "r") as f:
-            data = json.load(f)
-            return data.get("skip_drivers", {})
-    except:
-        return {}
+            continue
+    
+    print("WARNING: known_fp.json not found in any search path")
+    return {}
 
 
 KNOWN_FP = load_known_fp()
