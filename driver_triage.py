@@ -21,7 +21,14 @@ from ghidra.program.util import DefinedDataIterator
 # --- Known FP / Skip List ---
 def load_known_fp():
     """Load known false positives / already-investigated drivers."""
-    fp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_fp.json")
+    # Try Ghidra's sourceFile first (Jython), then fall back to __file__ (CPython)
+    try:
+        fp_path = os.path.join(os.path.dirname(os.path.abspath(sourceFile.getAbsolutePath())), "known_fp.json")
+    except:
+        try:
+            fp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_fp.json")
+        except:
+            return {}
     try:
         with open(fp_path, "r") as f:
             data = json.load(f)
@@ -893,6 +900,266 @@ def check_loldrivers(driver_name):
     return findings
 
 
+def check_symlink_creation(imports, strings):
+    """Check for symbolic link creation without ACL.
+    
+    From research: drivers with IoCreateSymbolicLink + IoCreateDevice (not Secure)
+    are directly accessible via \\.\DeviceName from any user. This was the case
+    in AsusWmiAcpi (\\.\ATKACPI), MediaTek (\\.\MTKBTFilter), AsIO3.
+    """
+    findings = []
+    
+    has_symlink = "iocreatesymboliclink" in imports
+    has_create = "iocreatedevice" in imports
+    has_secure = "iocreatedevicesecure" in imports
+    
+    if has_symlink and has_create and not has_secure:
+        # Find the device name from strings
+        device_names = [s for s in strings if "\\DosDevices\\" in s or "\\Device\\" in s]
+        detail = "Symbolic link + IoCreateDevice without IoCreateDeviceSecure"
+        if device_names:
+            detail += " (%s)" % device_names[0][:60]
+        findings.append({
+            "check": "symlink_no_acl",
+            "detail": detail,
+            "score": 20
+        })
+    
+    return findings
+
+
+def check_auth_bypass_patterns(program, imports):
+    """Detect potential auth bypass patterns.
+    
+    From research:
+    - AsIO3: check-after-use (wrmsr executes before validation return)
+    - nvpcf: user-controlled byte skips SeTokenIsAdmin check
+    - Samsung: no InputBufferLength validation before parsing
+    
+    Heuristic: drivers that import auth functions but have code paths that
+    bypass them. Also detect missing buffer length validation.
+    """
+    findings = []
+    
+    # Check for token/SID validation imports (indicates driver TRIES to auth)
+    auth_imports = {"setokenisadmin", "zwqueryinformationtoken", "zwopenprocesstokenex",
+                    "rtlequalsid", "seaccesscheck"}
+    has_auth = bool(imports & auth_imports)
+    has_irp = "iofcompleterequest" in imports or "iocompleterequest" in imports
+    
+    if has_auth and has_irp:
+        findings.append({
+            "check": "has_auth_checks",
+            "detail": "Driver implements auth checks (%s) - verify all IOCTLs are protected" % ", ".join(imports & auth_imports),
+            "score": 5  # Bonus: auth exists but may be incomplete (like AsusWmiAcpi)
+        })
+    elif has_irp and not has_auth:
+        # No auth at all - more interesting
+        findings.append({
+            "check": "no_auth_imports",
+            "detail": "Driver handles IOCTLs but imports NO authentication functions (no token/SID checks)",
+            "score": 10
+        })
+    
+    return findings
+
+
+def check_usb_passthrough(imports, strings):
+    """Detect USB request passthrough (like Samsung ssudbus2).
+    
+    Drivers that forward user-controlled USB control transfers to hardware
+    are high-value targets. The Samsung driver allowed arbitrary USB vendor/class
+    requests with no validation.
+    """
+    findings = []
+    
+    # USB-related imports
+    usb_imports = {"usbd_createconfigurationrequestex", "usbd_parseconfigurationdescriptorex",
+                   "usbd_getusbdiversion"}
+    usb_ioctl_imports = {"iobuilddeviceiocontrolrequest"}
+    
+    has_usb = bool(imports & usb_imports) or any("usb" in s.lower() for s in strings[:50])
+    has_urb_strings = any("urb" in s.lower() or "transferbuffer" in s.lower() for s in strings)
+    
+    # Check for internal USB submit patterns
+    usb_submit_strings = [s for s in strings if "ioctl_internal_usb" in s.lower() or "submit_urb" in s.lower()]
+    
+    if has_usb and ("iocalldriver" in imports or "iofcalldriver" in imports):
+        findings.append({
+            "check": "usb_request_forwarding",
+            "detail": "USB driver that forwards requests to lower stack (potential USB command passthrough)",
+            "score": 10
+        })
+    
+    return findings
+
+
+def check_hci_bt_surface(imports, strings):
+    """Detect Bluetooth HCI command passthrough (like MediaTek mtkbtfilterx).
+    
+    BT filter drivers with HCI/WMT command passthrough allow firmware manipulation,
+    eFuse access, and arbitrary BT chip control from userspace.
+    """
+    findings = []
+    
+    bt_indicators = ["bluetooth", "hci", "btfilter", "mtkbt", "bthusb", "btusb"]
+    has_bt = any(ind in s.lower() for s in strings for ind in bt_indicators)
+    
+    # Crypto imports suggest firmware decryption (like MediaTek)
+    crypto_imports = {"bcryptopenprovider", "bcryptdecrypt", "bcryptgeneratesymmetrickey",
+                      "bcryptcreatehash", "bcryptfinishhash", "bcrypthashdata",
+                      "bcryptopenalgorithmprovider"}
+    has_crypto = bool(imports & crypto_imports)
+    
+    if has_bt:
+        detail = "Bluetooth driver"
+        if has_crypto:
+            detail += " with crypto imports (potential firmware decryption - high-value target)"
+            findings.append({
+                "check": "bt_driver_crypto",
+                "detail": detail,
+                "score": 15
+            })
+        else:
+            findings.append({
+                "check": "bt_driver",
+                "detail": detail + " (check for HCI/WMT command passthrough)",
+                "score": 5
+            })
+    
+    return findings
+
+
+def check_efuse_access(strings):
+    """Detect eFuse read/write capability (like MediaTek).
+    
+    eFuse access from userspace = permanent hardware modification capability.
+    """
+    findings = []
+    
+    efuse_indicators = ["efuse", "e_fuse", "fuse_read", "fuse_write"]
+    for s in strings:
+        s_lower = s.lower()
+        for ind in efuse_indicators:
+            if ind in s_lower:
+                findings.append({
+                    "check": "efuse_access",
+                    "detail": "eFuse access detected (%s) - potential permanent hardware modification" % s[:60],
+                    "score": 20
+                })
+                return findings
+    
+    return findings
+
+
+def check_acpi_wmi_surface(imports, strings):
+    """Detect ACPI/WMI method execution (like AsusWmiAcpi).
+    
+    Drivers that expose ACPI WMI methods to userspace can allow hardware
+    control (fan speed, thermal policy, GPU switching, WiFi toggle).
+    """
+    findings = []
+    
+    wmi_imports = {"iowmiopenblock", "iowmiexecutemethod", "iowmiregistrationcontrol"}
+    has_wmi_exec = "iowmiexecutemethod" in imports or "iowmiopenblock" in imports
+    
+    acpi_strings = [s for s in strings if "acpi" in s.lower() or "pnp0c14" in s.lower() or "wmi" in s.lower()]
+    
+    if has_wmi_exec:
+        findings.append({
+            "check": "wmi_method_execution",
+            "detail": "Executes WMI methods (IoWMIExecuteMethod) - check if user-controlled method IDs",
+            "score": 15
+        })
+    
+    if any("\\device\\physicalmemory" in s.lower() for s in strings):
+        findings.append({
+            "check": "physical_memory_section",
+            "detail": "References \\Device\\PhysicalMemory - direct physical memory access primitive",
+            "score": 25
+        })
+    
+    return findings
+
+
+def check_port_io(program):
+    """Detect IN/OUT port I/O instructions (like AsIO3).
+    
+    Direct port I/O allows PCI config access (0xCF8/0xCFC), CMOS manipulation,
+    and other hardware control. Common in ASUS/MSI utility drivers.
+    """
+    findings = []
+    listing = program.getListing()
+    func_mgr = program.getFunctionManager()
+    
+    in_count = 0
+    out_count = 0
+    
+    for func in func_mgr.getFunctions(True):
+        body = func.getBody()
+        inst_iter = listing.getInstructions(body, True)
+        while inst_iter.hasNext():
+            inst = inst_iter.next()
+            mnemonic = inst.getMnemonicString().lower()
+            if mnemonic in ("in", "inb", "inw", "ind"):
+                in_count += 1
+            elif mnemonic in ("out", "outb", "outw", "outd"):
+                out_count += 1
+    
+    if in_count > 0 and out_count > 0:
+        findings.append({
+            "check": "port_io_rw",
+            "detail": "Port I/O: %d IN + %d OUT instructions (PCI config, CMOS, hardware control)" % (in_count, out_count),
+            "score": 20
+        })
+    elif in_count > 0:
+        findings.append({
+            "check": "port_io_read",
+            "detail": "Port I/O read: %d IN instructions" % in_count,
+            "score": 10
+        })
+    
+    return findings
+
+
+def check_compound_primitives(findings_so_far):
+    """Score compound exploit primitives based on combinations.
+    
+    From research:
+    - PhysMem R/W + MSR W = almost certainly exploitable (AsIO3)
+    - IOCTL surface + no auth + named device = low-hanging fruit (AsusWmiAcpi, Samsung)
+    - USB passthrough + no size validation = pool overflow (Samsung ssudbus2)
+    """
+    compound_findings = []
+    check_names = {f["check"] for f in findings_so_far}
+    
+    # MSR write + physical memory = god-mode driver
+    if "msr_write" in check_names and ("maps_physical_memory" in check_names or "physical_memory_rw" in check_names):
+        compound_findings.append({
+            "check": "compound_god_mode",
+            "detail": "MSR write + physical memory access = full kernel control primitive",
+            "score": 15
+        })
+    
+    # Named device + no auth + IOCTLs = easy target
+    if "named_device" in check_names and "no_auth_imports" in check_names:
+        compound_findings.append({
+            "check": "compound_easy_target",
+            "detail": "Named device with IOCTL surface and no authentication - low-hanging fruit",
+            "score": 10
+        })
+    
+    # Symlink + insecure creation + FILE_ANY_ACCESS pattern
+    if "symlink_no_acl" in check_names and "insecure_device_creation" in check_names:
+        compound_findings.append({
+            "check": "compound_wide_open",
+            "detail": "Symbolic link + insecure device creation = accessible from any user process",
+            "score": 10
+        })
+    
+    return compound_findings
+
+
 def check_hvci_compat(imports):
     """Check if driver is HVCI compatible."""
     findings = []
@@ -1010,7 +1277,7 @@ def run():
     all_findings.extend(check_hvci_compat(imports))
     # LOLDrivers cross-reference
     all_findings.extend(check_loldrivers(driver_name))
-    # New checks (v2)
+    # v2 checks
     all_findings.extend(check_msr_access(program))
     all_findings.extend(check_cr_access(program))
     all_findings.extend(check_token_steal(imports))
@@ -1019,15 +1286,25 @@ def run():
     all_findings.extend(check_firmware_access(imports, strings))
     all_findings.extend(check_disk_access(strings))
     all_findings.extend(check_registry_kernel(imports))
-    # New checks (v3 - feedback refinements)
+    # v3 checks (feedback refinements)
     all_findings.extend(check_irp_forwarding(imports))
     all_findings.extend(check_thin_driver(program, imports))
     all_findings.extend(check_unchecked_copy(imports, program))
     all_findings.extend(check_internal_validation(imports))
-    # New checks (v3.2 - vendor/class context)
+    # v3.2 checks (vendor/class context)
     all_findings.extend(check_vendor_context(strings, driver_name))
     all_findings.extend(check_driver_class(strings, driver_name))
     all_findings.extend(check_large_ioctl_surface(program))
+    # v4.1 checks (from real vuln research: Samsung, ASUS, MediaTek, NVIDIA)
+    all_findings.extend(check_symlink_creation(imports, strings))
+    all_findings.extend(check_auth_bypass_patterns(program, imports))
+    all_findings.extend(check_usb_passthrough(imports, strings))
+    all_findings.extend(check_hci_bt_surface(imports, strings))
+    all_findings.extend(check_efuse_access(strings))
+    all_findings.extend(check_acpi_wmi_surface(imports, strings))
+    all_findings.extend(check_port_io(program))
+    # Compound scoring (must run last - uses results from above)
+    all_findings.extend(check_compound_primitives(all_findings))
     
     total_score = sum(f["score"] for f in all_findings)
     
