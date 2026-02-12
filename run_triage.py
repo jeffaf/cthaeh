@@ -556,8 +556,17 @@ def main():
             write_report(results, report_output, args.report_top)
         print_summary(results)
     
-    if args.explain and results:
-        explain_driver(results, args.explain)
+    if results:
+        if args.explain:
+            explain_driver(results, args.explain)
+        else:
+            # Always explain the top scorer
+            top = sorted(results, key=lambda x: x.get("score", 0), reverse=True)
+            # Skip KNOWN_FP for auto-explain
+            top = [r for r in top if r.get("priority") != "KNOWN_FP"]
+            if top:
+                print(f"\n--- Auto-explain: top scorer ---")
+                explain_driver(results, top[0].get("driver", {}).get("name", ""))
     
     print(f"\nCompleted in {elapsed:.1f}s ({elapsed/max(len(drivers),1):.1f}s per driver)")
     
