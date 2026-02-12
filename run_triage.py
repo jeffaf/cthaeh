@@ -257,11 +257,11 @@ def write_report(results, output_path, top_n=20):
     medium = sum(1 for r in results if r.get("priority") == "MEDIUM")
     low = sum(1 for r in results if r.get("priority") == "LOW")
     skip = sum(1 for r in results if r.get("priority") == "SKIP")
-    known_fp = sum(1 for r in results if r.get("priority") == "KNOWN_FP")
+    known_fp = sum(1 for r in results if r.get("priority") == "INVESTIGATED")
     
     PRIORITY_EMOJI = {
         "CRITICAL": "💀", "HIGH": "🔴", "MEDIUM": "🟡",
-        "LOW": "🟢", "SKIP": "⚪", "KNOWN_FP": "🚫"
+        "LOW": "🟢", "SKIP": "⚪", "INVESTIGATED": "🚫"
     }
     
     lines = []
@@ -278,7 +278,7 @@ def write_report(results, output_path, top_n=20):
     lines.append(f"- 🟢 LOW: {low}")
     lines.append(f"- ⚪ SKIP: {skip}")
     if known_fp:
-        lines.append(f"- 🚫 Known FP/Investigated: {known_fp}")
+        lines.append(f"- 🚫 Investigated: {known_fp}")
     lines.append("")
     lines.append(f"## Top {top_n} Candidates")
     lines.append("")
@@ -571,8 +571,8 @@ def main():
         else:
             # Always explain the top scorer
             top = sorted(results, key=lambda x: x.get("score", 0), reverse=True)
-            # Skip KNOWN_FP for auto-explain
-            top = [r for r in top if r.get("priority") != "KNOWN_FP"]
+            # Skip INVESTIGATED for auto-explain
+            top = [r for r in top if r.get("priority") != "INVESTIGATED"]
             if top:
                 print(f"\n--- Auto-explain: top scorer ---")
                 explain_driver(results, top[0].get("driver", {}).get("name", ""))

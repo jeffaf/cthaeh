@@ -185,9 +185,8 @@ def load_known_fp():
         try:
             with open(fp_path, "r") as f:
                 data = json.load(f)
-                result = data.get("skip_drivers", {})
+                result = data.get("investigated", data.get("skip_drivers", {}))
                 if result:
-                    # Print to stderr so it shows in Ghidra output
                     print("known_fp.json loaded from: %s (%d entries)" % (fp_path, len(result)))
                     return result
         except:
@@ -197,7 +196,7 @@ def load_known_fp():
     return {}
 
 
-KNOWN_FP = load_known_fp()
+INVESTIGATED = load_known_fp()
 
 
 def get_imports(program):
@@ -1624,12 +1623,12 @@ def run():
     driver_name = driver_info.get("name", "")
     
     # Check known FP / already-investigated list
-    skip_reason = KNOWN_FP.get(driver_name)
+    skip_reason = INVESTIGATED.get(driver_name)
     if skip_reason:
         result = {
             "driver": driver_info,
             "score": 0,
-            "priority": "KNOWN_FP",
+            "priority": "INVESTIGATED",
             "skip_reason": skip_reason,
             "findings_count": 0,
             "findings": [{

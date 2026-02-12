@@ -1,9 +1,9 @@
 {
-  "skip_drivers": {
-    "nvpcf.sys": "FP confirmed Feb 2026 - MSR read not user-reachable, WDF device interface blocks unprivileged access",
-    "AMDRyzenMasterDriver.sys": "Cannot obtain latest version for analysis - skip until available",
-    "AsusSAIO.sys": "Already investigated and submitted to ASUS PSIRT (Feb 2026)",
-    "ssudbus2.sys": "Already submitted to Samsung PSIRT - 4 vulns found (Feb 2026)",
-    "amdfendr.sys": "Investigated Feb 2026 - AMD Fenced Runner, legitimate hardware management driver"
+  "investigated": {
+    "nvpcf.sys": "FP - MSR read not user-reachable, WDF device interface blocks unprivileged access",
+    "AMDRyzenMasterDriver.sys": "Skipped - cannot obtain latest version for analysis",
+    "AsusSAIO.sys": "1 vuln accepted by ASUS PSIRT, 3 rejected (Feb 2026)",
+    "ssudbus2.sys": "4 vulns submitted to Samsung PSIRT (Feb 2026)",
+    "amdfendr.sys": "FP - AMD Fenced Runner, legitimate hardware management driver"
   }
 }

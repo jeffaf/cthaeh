@@ -33,18 +33,18 @@ CONFIRMED_VULNS = {
     },
 }
 
-# Known FPs: should be KNOWN_FP (skipped) or score below CRITICAL
-KNOWN_FPS = {
+# Known FPs: should be INVESTIGATED (skipped) or score below CRITICAL
+INVESTIGATEDS = {
     "nvpcf.sys": {
-        "max_priority": "KNOWN_FP",  # Should be skipped
+        "max_priority": "INVESTIGATED",  # Should be skipped
         "reason": "MSR read not user-reachable",
     },
     "AMDRyzenMasterDriver.sys": {
-        "max_priority": "KNOWN_FP",
+        "max_priority": "INVESTIGATED",
         "reason": "Cannot obtain latest version",
     },
     "AsusSAIO.sys": {
-        "max_priority": "KNOWN_FP",
+        "max_priority": "INVESTIGATED",
         "reason": "Already investigated",
     },
 }
@@ -90,9 +90,9 @@ def run_tests(results):
         priority = r.get("priority", "?")
         checks = {f["check"] for f in r.get("findings", [])}
         
-        # KNOWN_FP drivers are expected to be skipped (they've been investigated)
-        if priority == "KNOWN_FP":
-            print(f"  PASS  {driver_name}: KNOWN_FP (already investigated, skip is correct)")
+        # INVESTIGATED drivers are expected to be skipped (they've been investigated)
+        if priority in ("INVESTIGATED", "KNOWN_FP"):
+            print(f"  PASS  {driver_name}: {priority} (already investigated, skip is correct)")
             passed += 1
             continue
         
@@ -115,7 +115,7 @@ def run_tests(results):
     
     # Test known FPs
     print("=== Known False Positives (should be skipped) ===")
-    for driver_name, expected in KNOWN_FPS.items():
+    for driver_name, expected in INVESTIGATEDS.items():
         r = find_driver(results, driver_name)
         if not r:
             print(f"  SKIP  {driver_name} - not in results")
@@ -123,7 +123,8 @@ def run_tests(results):
             continue
         
         priority = r.get("priority", "?")
-        if priority == expected["max_priority"]:
+        accepted = {expected["max_priority"], "KNOWN_FP"}  # Accept legacy label too
+        if priority in accepted:
             print(f"  PASS  {driver_name}: priority={priority}")
             passed += 1
         else:
@@ -143,7 +144,7 @@ def run_tests(results):
         print(f"  FAIL  Max score {max_score} > {SANITY_CHECKS['max_possible_score']}")
         failed += 1
     
-    active_results = [r for r in results if r.get("priority") != "KNOWN_FP"]
+    active_results = [r for r in results if r.get("priority") not in ("INVESTIGATED", "KNOWN_FP")]
     if active_results:
         critical_count = sum(1 for r in active_results if r.get("priority") == "CRITICAL")
         critical_pct = (critical_count / len(active_results)) * 100
