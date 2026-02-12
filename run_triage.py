@@ -493,6 +493,15 @@ def main():
     if not ghidra_path:
         parser.error("Could not find Ghidra. Set GHIDRA_HOME env var or use --ghidra")
     
+    # Validate Ghidra path
+    if sys.platform == "win32":
+        headless = os.path.join(ghidra_path, "support", "analyzeHeadless.bat")
+    else:
+        headless = os.path.join(ghidra_path, "support", "analyzeHeadless")
+    
+    if not os.path.exists(headless):
+        parser.error(f"Invalid Ghidra path: {ghidra_path} (no analyzeHeadless found in support/)")
+    
     # Auto-detect worker count
     workers = args.workers if args.workers > 0 else detect_cpu_count()
     
