@@ -316,7 +316,7 @@ def write_report(results, output_path, top_n=20):
                 lines.append(f"- [{score_str}] {f['detail']}")
             lines.append("")
     
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     
     print(f"Markdown report written to: {output_path}")
