@@ -113,6 +113,10 @@ vendor sites ──→ download ──→ Cthaeh triage ──→ ranked list �
                                                       CVE submission
 ```
 
+## Writing
+
+I'm documenting this workflow in [Cred Relay](https://credrelay.com), my monthly newsletter on offensive security and AI. Issue #2 covers how I used Cthaeh + Claude Code + Ghidra to find 8 kernel driver vulnerabilities in a single day.
+
 ## License
 
 MIT
