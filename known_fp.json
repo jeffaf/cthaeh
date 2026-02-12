@@ -1,0 +1,9 @@
+{
+  "skip_drivers": {
+    "nvpcf.sys": "FP confirmed Feb 2026 - MSR read not user-reachable, scored 200 but no real attack surface",
+    "AMDRyzenMasterDriver.sys": "Cannot obtain latest version for analysis - skip until available",
+    "AsusSAIO.sys": "Already investigated and submitted to ASUS PSIRT (Feb 2026)",
+    "ssudqcnet.sys": "Samsung - already submitted ssudbus2 vulns to Samsung PSIRT (Feb 2026)",
+    "ssudbus2.sys": "Already submitted to Samsung PSIRT - 4 vulns found (Feb 2026)"
+  }
+}
