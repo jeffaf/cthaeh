@@ -322,13 +322,68 @@ def write_report(results, output_path, top_n=20):
     print(f"Markdown report written to: {output_path}")
 
 
+def explain_driver(results, driver_name):
+    """Show detailed scoring breakdown for a specific driver."""
+    driver_name_lower = driver_name.lower()
+    
+    match = None
+    for r in results:
+        d = r.get("driver", {})
+        name = d.get("name", "")
+        if name.lower() == driver_name_lower or name.lower().replace(".sys", "") == driver_name_lower.replace(".sys", ""):
+            match = r
+            break
+    
+    if not match:
+        print(f"Driver '{driver_name}' not found in results.")
+        print("Available drivers:")
+        for r in sorted(results, key=lambda x: x.get("score", 0), reverse=True)[:20]:
+            d = r.get("driver", {})
+            print(f"  {d.get('name', '?')} ({r.get('score', 0)} pts)")
+        return
+    
+    d = match.get("driver", {})
+    print(f"\n{'='*60}")
+    print(f"  EXPLAIN: {d.get('name', '?')}")
+    print(f"{'='*60}")
+    print(f"  Score: {match.get('score', 0)} | Priority: {match.get('priority', '?')}")
+    print(f"  Size: {d.get('size', 0):,} bytes | Functions: {d.get('function_count', 0)}")
+    if d.get("version_summary"):
+        print(f"  Vendor: {d['version_summary']}")
+    print()
+    
+    findings = match.get("findings", [])
+    scored = sorted([f for f in findings if f["score"] != 0], key=lambda x: x["score"], reverse=True)
+    zero = [f for f in findings if f["score"] == 0]
+    
+    if scored:
+        print("  Scored checks:")
+        total_pos = 0
+        total_neg = 0
+        for f in scored:
+            sign = "+" if f["score"] > 0 else ""
+            print(f"    {sign}{f['score']:>4}  [{f['check']}] {f['detail']}")
+            if f["score"] > 0:
+                total_pos += f["score"]
+            else:
+                total_neg += f["score"]
+        print(f"\n    Positive: +{total_pos} | Negative: {total_neg} | Net: {total_pos + total_neg}")
+    
+    if zero:
+        print(f"\n  Informational ({len(zero)} checks, 0 pts each):")
+        for f in zero:
+            print(f"    [0]  [{f['check']}] {f['detail']}")
+    
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="🌳 Cthaeh - Driver vulnerability triage scanner"
     )
     parser.add_argument("--drivers-dir", help="Directory containing .sys files")
     parser.add_argument("--single", help="Single .sys file to analyze")
-    parser.add_argument("--ghidra", required=True, help="Path to Ghidra installation")
+    parser.add_argument("--ghidra", help="Path to Ghidra installation (required for scanning)")
     parser.add_argument("--output", default="triage_results.csv", help="Output CSV path")
     parser.add_argument("--max", type=int, default=0, help="Max drivers to analyze (0=all)")
     parser.add_argument("--workers", type=int, default=1,
@@ -341,11 +396,31 @@ def main():
     parser.add_argument("--report", help="Generate markdown report (specify output .md path)")
     parser.add_argument("--report-top", type=int, default=20,
                         help="Number of top drivers to include in report (default: 20)")
+    parser.add_argument("--explain", help="Show detailed scoring breakdown for a specific driver (by name)")
     
     args = parser.parse_args()
     
+    # --explain can work with existing JSON results (no scan needed)
+    if args.explain and not args.drivers_dir and not args.single:
+        json_candidates = [
+            args.json_output,
+            "triage_results.json",
+            os.path.expanduser("~/triage_results.json"),
+        ]
+        for candidate in json_candidates:
+            if candidate and os.path.exists(candidate):
+                with open(candidate, "r") as f:
+                    results = json.load(f)
+                explain_driver(results, args.explain)
+                return
+        print("ERROR: No triage_results.json found. Run a scan first or specify --json-output.")
+        return
+    
     if not args.drivers_dir and not args.single:
         parser.error("Must specify --drivers-dir or --single")
+    
+    if not args.ghidra:
+        parser.error("--ghidra is required for scanning")
     
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "driver_triage.py")
     
@@ -399,6 +474,9 @@ def main():
         if args.report:
             write_report(results, args.report, args.report_top)
         print_summary(results)
+    
+    if args.explain and results:
+        explain_driver(results, args.explain)
     
     print(f"\nCompleted in {elapsed:.1f}s ({elapsed/max(len(drivers),1):.1f}s per driver)")
     

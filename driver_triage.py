@@ -18,6 +18,126 @@ from ghidra.program.model.symbol import SourceType
 from ghidra.program.util import DefinedDataIterator
 
 
+# --- Scoring Weights Configuration ---
+# All point values in one place for easy tuning.
+# Positive = increases risk score. Negative = reduces risk score.
+WEIGHTS = {
+    # Device creation & IOCTL handling
+    "insecure_device_creation": 15,
+    "has_ioctl_handler": 10,
+    "method_neither_heavy": 10,
+    "file_any_access_heavy": 10,
+    "no_probe_functions": 10,
+
+    # Pool & memory operations
+    "deprecated_pool_alloc": 10,
+    "maps_physical_memory": 15,
+    "maps_memory_section": 10,
+    "maps_locked_pages": 10,
+    "maps_locked_pages_cache": 10,
+    "object_reference": 10,
+    "file_operations": 5,
+    "file_write": 5,
+    "file_read": 5,
+    "memcpy_present": 5,
+    "memmove_present": 3,
+
+    # BYOVD
+    "byovd_process_killer": 20,
+
+    # Physical memory
+    "physical_memory_rw": 15,
+
+    # MSR / CR access
+    "msr_write": 25,
+    "msr_read": 15,
+    "control_register_access": 20,
+
+    # Token stealing
+    "token_steal_primitives": 15,
+    "process_lookup": 5,
+
+    # Known-bad codebases
+    "winio_codebase": 25,
+    "dse_bypass_indicator": 20,
+
+    # Firmware / disk / registry
+    "firmware_bus_access": 15,
+    "raw_disk_access": 15,
+    "kernel_registry_write": 10,
+
+    # Driver structure
+    "thin_driver_critical": 15,
+    "thin_driver": 8,
+    "unchecked_copy": 20,
+    "weak_copy_validation": 10,
+
+    # Internal validation (negative = FP reducer)
+    "has_internal_validation": -10,
+
+    # Vendor context
+    "vendor_cna_bounty": 20,
+    "vendor_cna": 10,
+
+    # Driver class
+    "wifi_driver": 15,
+    "audio_class_driver": -15,
+    "windows_inbox_driver": -15,  # Raised from -10
+
+    # IOCTL surface
+    "massive_ioctl_surface": 15,
+    "large_ioctl_surface": 10,
+    "moderate_ioctl_surface": 5,
+
+    # Device interface
+    "named_device": 15,
+    "device_interface_guid": 5,
+
+    # LOLDrivers
+    "loldrivers_known": -30,  # Raised from -20 (stronger deprioritization)
+
+    # v4.1 research-driven checks
+    "symlink_no_acl": 20,
+    "has_auth_checks": 5,
+    "no_auth_imports": 10,
+    "usb_request_forwarding": 10,
+    "bt_driver_crypto": 15,
+    "bt_driver": 5,
+    "efuse_access": 20,
+    "wmi_method_execution": 15,
+    "physical_memory_section": 25,
+    "port_io_rw": 20,
+    "port_io_read": 10,
+
+    # Compound primitives
+    "compound_god_mode": 15,
+    "compound_easy_target": 10,
+    "compound_wide_open": 10,
+
+    # v4.2: vuln pattern composite (from real findings)
+    "vuln_pattern_composite": 25,
+
+    # HVCI
+    "likely_hvci_incompatible": 5,
+
+    # WHQL-signed / inbox penalty (stronger negative scoring)
+    "whql_signed_inbox": -20,
+}
+
+# Scoring thresholds
+THRESHOLDS = {
+    "CRITICAL": 150,  # Raised from 120
+    "HIGH": 85,
+    "MEDIUM": 55,
+    "LOW": 30,
+}
+
+
+def get_weight(check_id):
+    """Get the weight for a check, defaulting to 0 if not in config."""
+    return WEIGHTS.get(check_id, 0)
+
+
 # --- Known FP / Skip List ---
 def load_known_fp():
     """Load known false positives / already-investigated drivers."""
@@ -70,7 +190,7 @@ def check_device_creation(imports, strings):
         findings.append({
             "check": "insecure_device_creation",
             "detail": "Uses IoCreateDevice without IoCreateDeviceSecure",
-            "score": 15
+            "score": get_weight("insecure_device_creation")
         })
     
     return findings
@@ -88,7 +208,7 @@ def check_ioctl_handling(imports, program):
         findings.append({
             "check": "has_ioctl_handler",
             "detail": "Driver handles IRPs (potential IOCTL attack surface)",
-            "score": 10
+            "score": get_weight("has_ioctl_handler")
         })
     
     return findings
@@ -137,7 +257,7 @@ def check_buffer_methods(program):
             findings.append({
                 "check": "method_neither_heavy",
                 "detail": "Found %d potential METHOD_NEITHER IOCTLs (raw user pointers) - unusually high" % method_neither_count,
-                "score": 10
+                "score": get_weight("method_neither_heavy")
             })
         else:
             findings.append({
@@ -159,7 +279,7 @@ def check_buffer_methods(program):
             findings.append({
                 "check": "file_any_access_heavy",
                 "detail": "Found %d IOCTLs with FILE_ANY_ACCESS (no privilege check) - unusually high" % file_any_access_count,
-                "score": 10
+                "score": get_weight("file_any_access_heavy")
             })
         else:
             findings.append({
@@ -183,7 +303,7 @@ def check_validation(imports):
         findings.append({
             "check": "no_probe_functions",
             "detail": "Handles IRPs but never imports ProbeForRead/ProbeForWrite",
-            "score": 10
+            "score": get_weight("no_probe_functions")
         })
     
     return findings
@@ -200,7 +320,7 @@ def check_pool_operations(imports):
             findings.append({
                 "check": "deprecated_pool_alloc",
                 "detail": "Uses deprecated ExAllocatePool (no NX flag)",
-                "score": 10
+                "score": get_weight("deprecated_pool_alloc")
             })
         
         findings.append({
@@ -232,12 +352,12 @@ def check_dangerous_operations(imports):
         "iowmiregistrationcontrol": ("wmi_provider", "WMI provider - additional attack surface", 0),  # 64% fire rate
     }
     
-    for func_name, (check_id, detail, score) in dangerous.items():
+    for func_name, (check_id, detail, _default_score) in dangerous.items():
         if func_name in imports:
             findings.append({
                 "check": check_id,
                 "detail": detail,
-                "score": score
+                "score": get_weight(check_id)
             })
     
     return findings
@@ -262,7 +382,7 @@ def check_byovd_potential(imports):
             "check": "byovd_process_killer",
             "detail": "BYOVD candidate: has %s + %s (can open and kill processes)" % (
                 ", ".join(opener_names), ", ".join(terminator_names)),
-            "score": 20
+            "score": get_weight("byovd_process_killer")
         })
     
     return findings
@@ -282,7 +402,7 @@ def check_physical_memory(imports):
         findings.append({
             "check": "physical_memory_rw",
             "detail": "Multiple physical memory mapping imports: %s" % ", ".join(found),
-            "score": 15
+            "score": get_weight("physical_memory_rw")
         })
     
     return findings
@@ -312,14 +432,14 @@ def check_msr_access(program):
         findings.append({
             "check": "msr_write",
             "detail": "Contains %d WRMSR instruction(s) - can write MSR registers (LSTAR hijack for kernel code exec)" % wrmsr_count,
-            "score": 25
+            "score": get_weight("msr_write")
         })
     
     if rdmsr_count > 0:
         findings.append({
             "check": "msr_read",
             "detail": "Contains %d RDMSR instruction(s) - can read MSR registers (KASLR defeat via LSTAR leak)" % rdmsr_count,
-            "score": 15
+            "score": get_weight("msr_read")
         })
     
     return findings
@@ -349,7 +469,7 @@ def check_cr_access(program):
             "check": "control_register_access",
             "detail": "Control register manipulation (%d instances) - can disable SMEP/WP: %s" % (
                 len(cr_writes), ", ".join(cr_writes[:3])),
-            "score": 20
+            "score": get_weight("control_register_access")
         })
     
     return findings
@@ -367,13 +487,13 @@ def check_token_steal(imports):
         findings.append({
             "check": "token_steal_primitives",
             "detail": "Token stealing imports: %s (EPROCESS manipulation / LPE)" % ", ".join(found),
-            "score": 15
+            "score": get_weight("token_steal_primitives")
         })
     elif "pslookupprocessbyprocessid" in imports:
         findings.append({
             "check": "process_lookup",
             "detail": "PsLookupProcessByProcessId present (process enumeration capability)",
-            "score": 5
+            "score": get_weight("process_lookup")
         })
     
     return findings
@@ -393,7 +513,7 @@ def check_winio_codebase(strings):
                 findings.append({
                     "check": "winio_codebase",
                     "detail": "WinIO/WinRing0 codebase detected (%s) - known vulnerable driver family (MSR+PhysMem+StackOverflow)" % s[:60],
-                    "score": 25
+                    "score": get_weight("winio_codebase")
                 })
                 return findings
     
@@ -413,7 +533,7 @@ def check_dse_bypass(strings):
                 findings.append({
                     "check": "dse_bypass_indicator",
                     "detail": "DSE bypass string: %s (can disable driver signature enforcement)" % s[:60],
-                    "score": 20
+                    "score": get_weight("dse_bypass_indicator")
                 })
                 return findings
     
@@ -431,7 +551,7 @@ def check_firmware_access(imports, strings):
         findings.append({
             "check": "firmware_bus_access",
             "detail": "HAL bus data access: %s (firmware/SPI/SMBus interaction)" % ", ".join(found),
-            "score": 15
+            "score": get_weight("firmware_bus_access")
         })
     
     # firmware_string removed - fires on 83% of drivers (too noisy)
@@ -454,7 +574,7 @@ def check_disk_access(strings):
                 findings.append({
                     "check": "raw_disk_access",
                     "detail": "Raw disk/memory access: %s (wiper/rootkit capability)" % s[:60],
-                    "score": 15
+                    "score": get_weight("raw_disk_access")
                 })
                 return findings
     
@@ -474,7 +594,7 @@ def check_registry_kernel(imports):
         findings.append({
             "check": "kernel_registry_write",
             "detail": "Kernel registry write: %s (persistence vector)" % ", ".join(write_funcs),
-            "score": 10
+            "score": get_weight("kernel_registry_write")
         })
     
     return findings
@@ -506,13 +626,13 @@ def check_thin_driver(program, imports):
         findings.append({
             "check": "thin_driver_critical",
             "detail": "Very small driver (%d bytes) with IRP handling and only %d functions - minimal validation likely" % (code_size, func_count),
-            "score": 15
+            "score": get_weight("thin_driver_critical")
         })
     elif has_irp and code_size < 16384:  # < 16KB
         findings.append({
             "check": "thin_driver",
             "detail": "Small driver (%d bytes) with IRP handling and %d functions - limited room for validation" % (code_size, func_count),
-            "score": 8
+            "score": get_weight("thin_driver")
         })
     
     return findings
@@ -538,14 +658,14 @@ def check_unchecked_copy(imports, program):
         findings.append({
             "check": "unchecked_copy",
             "detail": "CRITICAL: %s with IRP handling but no ProbeFor*/quota alloc - user-controlled sizes likely" % ", ".join(copy_names),
-            "score": 20
+            "score": get_weight("unchecked_copy")
         })
     elif has_copy and has_irp and not has_probe:
         copy_names = [i for i in imports if i in copy_funcs]
         findings.append({
             "check": "weak_copy_validation",
             "detail": "%s with IRP handling, no ProbeFor* (has quota alloc) - partial validation" % ", ".join(copy_names),
-            "score": 10
+            "score": get_weight("weak_copy_validation")
         })
     
     return findings
@@ -571,7 +691,7 @@ def check_internal_validation(imports):
         findings.append({
             "check": "has_internal_validation",
             "detail": "Driver has internal object validation (%s) - may reduce exploitability" % ", ".join(list(found)[:4]),
-            "score": -10  # Negative score = reduces overall risk
+            "score": get_weight("has_internal_validation")  # Negative score = reduces overall risk
         })
     
     return findings
@@ -612,9 +732,11 @@ AUDIO_DRIVER_PATTERNS = [
 ]
 
 # Windows inbox driver patterns (well-audited, lower priority)
+# NOTE: These must match the FULL driver name or start, not substrings.
+# "acpi" was removed because it false-matches vendor ACPI drivers like AsusWmiAcpi.
 INBOX_DRIVER_PATTERNS = [
     "ntfs", "ndis", "tcpip", "http", "fltmgr",
-    "volmgr", "storport", "pci", "acpi",
+    "volmgr", "storport", "pci",
     "wdf01000", "ksecdd", "cng",
 ]
 
@@ -696,13 +818,13 @@ def check_vendor_context(strings, driver_name):
             findings.append({
                 "check": "vendor_cna_bounty",
                 "detail": "Vendor %s is CNA with bounty program (high-value disclosure target)" % vendor_name.title(),
-                "score": 20
+                "score": get_weight("vendor_cna_bounty")
             })
         elif info["cna"]:
             findings.append({
                 "check": "vendor_cna",
                 "detail": "Vendor %s is CNA (easier CVE assignment path)" % vendor_name.title(),
-                "score": 10
+                "score": get_weight("vendor_cna")
             })
     
     return findings
@@ -719,27 +841,28 @@ def check_driver_class(strings, driver_name):
             findings.append({
                 "check": "wifi_driver",
                 "detail": "WiFi driver (matched '%s') - massive IOCTL/WDI attack surface, historically rich in vulns" % pattern,
-                "score": 15
+                "score": get_weight("wifi_driver")
             })
             return findings
     
     # Audio drivers - typically tiny IOCTL surface, low priority
     for pattern in AUDIO_DRIVER_PATTERNS:
-        if pattern in driver_lower:
+        if driver_lower.startswith(pattern):
             findings.append({
                 "check": "audio_class_driver",
                 "detail": "Audio class driver (matched '%s') - typically minimal IOCTL attack surface" % pattern,
-                "score": -15
+                "score": get_weight("audio_class_driver")
             })
             return findings
     
     # Windows inbox drivers - well-audited by Microsoft
+    # Use startswith to avoid false matches (e.g. "acpi" in "AsusWmiAcpi")
     for pattern in INBOX_DRIVER_PATTERNS:
-        if pattern in driver_lower:
+        if driver_lower.startswith(pattern):
             findings.append({
                 "check": "windows_inbox_driver",
                 "detail": "Windows inbox driver (matched '%s') - well-audited by Microsoft" % pattern,
-                "score": -10
+                "score": get_weight("windows_inbox_driver")
             })
             return findings
     
@@ -794,19 +917,19 @@ def check_large_ioctl_surface(program):
         findings.append({
             "check": "massive_ioctl_surface",
             "detail": "Massive IOCTL surface: %d dispatched / %d total codes detected" % (dispatched, total),
-            "score": 15
+            "score": get_weight("massive_ioctl_surface")
         })
     elif dispatched > 25:
         findings.append({
             "check": "large_ioctl_surface",
             "detail": "Large IOCTL surface: %d dispatched / %d total codes detected" % (dispatched, total),
-            "score": 10
+            "score": get_weight("large_ioctl_surface")
         })
     elif dispatched > 10:
         findings.append({
             "check": "moderate_ioctl_surface",
             "detail": "Moderate IOCTL surface: %d dispatched / %d total codes detected" % (dispatched, total),
-            "score": 5
+            "score": get_weight("moderate_ioctl_surface")
         })
     elif total > 10 and dispatched <= 10:
         findings.append({
@@ -827,7 +950,7 @@ def check_device_interface(strings):
             findings.append({
                 "check": "named_device",
                 "detail": "Creates named device: %s" % s[:80],
-                "score": 15
+                "score": get_weight("named_device")
             })
             break
     
@@ -837,7 +960,7 @@ def check_device_interface(strings):
             findings.append({
                 "check": "device_interface_guid",
                 "detail": "Registers device interface (accessible via SetupDi*)",
-                "score": 5
+                "score": get_weight("device_interface_guid")
             })
             break
     
@@ -863,7 +986,7 @@ def check_loldrivers(driver_name):
                 findings.append({
                     "check": "loldrivers_known",
                     "detail": "Listed in LOLDrivers: %s (already documented, skip unless new vuln class)" % entry.get("description", "known vulnerable")[:80],
-                    "score": -20  # Deprioritize already-documented drivers
+                    "score": get_weight("loldrivers_known")  # Deprioritize already-documented drivers
                 })
                 return findings
     except:
@@ -894,7 +1017,7 @@ def check_loldrivers(driver_name):
         findings.append({
             "check": "loldrivers_known",
             "detail": "Known LOLDriver: %s (already documented, deprioritize)" % KNOWN_LOLDRIVERS[driver_lower],
-            "score": -20
+            "score": get_weight("loldrivers_known")
         })
     
     return findings
@@ -922,7 +1045,7 @@ def check_symlink_creation(imports, strings):
         findings.append({
             "check": "symlink_no_acl",
             "detail": detail,
-            "score": 20
+            "score": get_weight("symlink_no_acl")
         })
     
     return findings
@@ -951,14 +1074,14 @@ def check_auth_bypass_patterns(program, imports):
         findings.append({
             "check": "has_auth_checks",
             "detail": "Driver implements auth checks (%s) - verify all IOCTLs are protected" % ", ".join(imports & auth_imports),
-            "score": 5  # Bonus: auth exists but may be incomplete (like AsusWmiAcpi)
+            "score": get_weight("has_auth_checks")  # Bonus: auth exists but may be incomplete (like AsusWmiAcpi)
         })
     elif has_irp and not has_auth:
         # No auth at all - more interesting
         findings.append({
             "check": "no_auth_imports",
             "detail": "Driver handles IOCTLs but imports NO authentication functions (no token/SID checks)",
-            "score": 10
+            "score": get_weight("no_auth_imports")
         })
     
     return findings
@@ -988,7 +1111,7 @@ def check_usb_passthrough(imports, strings):
         findings.append({
             "check": "usb_request_forwarding",
             "detail": "USB driver that forwards requests to lower stack (potential USB command passthrough)",
-            "score": 10
+            "score": get_weight("usb_request_forwarding")
         })
     
     return findings
@@ -1018,13 +1141,13 @@ def check_hci_bt_surface(imports, strings):
             findings.append({
                 "check": "bt_driver_crypto",
                 "detail": detail,
-                "score": 15
+                "score": get_weight("bt_driver_crypto")
             })
         else:
             findings.append({
                 "check": "bt_driver",
                 "detail": detail + " (check for HCI/WMT command passthrough)",
-                "score": 5
+                "score": get_weight("bt_driver")
             })
     
     return findings
@@ -1045,7 +1168,7 @@ def check_efuse_access(strings):
                 findings.append({
                     "check": "efuse_access",
                     "detail": "eFuse access detected (%s) - potential permanent hardware modification" % s[:60],
-                    "score": 20
+                    "score": get_weight("efuse_access")
                 })
                 return findings
     
@@ -1069,14 +1192,14 @@ def check_acpi_wmi_surface(imports, strings):
         findings.append({
             "check": "wmi_method_execution",
             "detail": "Executes WMI methods (IoWMIExecuteMethod) - check if user-controlled method IDs",
-            "score": 15
+            "score": get_weight("wmi_method_execution")
         })
     
     if any("\\device\\physicalmemory" in s.lower() for s in strings):
         findings.append({
             "check": "physical_memory_section",
             "detail": "References \\Device\\PhysicalMemory - direct physical memory access primitive",
-            "score": 25
+            "score": get_weight("physical_memory_section")
         })
     
     return findings
@@ -1110,13 +1233,13 @@ def check_port_io(program):
         findings.append({
             "check": "port_io_rw",
             "detail": "Port I/O: %d IN + %d OUT instructions (PCI config, CMOS, hardware control)" % (in_count, out_count),
-            "score": 20
+            "score": get_weight("port_io_rw")
         })
     elif in_count > 0:
         findings.append({
             "check": "port_io_read",
             "detail": "Port I/O read: %d IN instructions" % in_count,
-            "score": 10
+            "score": get_weight("port_io_read")
         })
     
     return findings
@@ -1138,7 +1261,7 @@ def check_compound_primitives(findings_so_far):
         compound_findings.append({
             "check": "compound_god_mode",
             "detail": "MSR write + physical memory access = full kernel control primitive",
-            "score": 15
+            "score": get_weight("compound_god_mode")
         })
     
     # Named device + no auth + IOCTLs = easy target
@@ -1146,7 +1269,7 @@ def check_compound_primitives(findings_so_far):
         compound_findings.append({
             "check": "compound_easy_target",
             "detail": "Named device with IOCTL surface and no authentication - low-hanging fruit",
-            "score": 10
+            "score": get_weight("compound_easy_target")
         })
     
     # Symlink + insecure creation + FILE_ANY_ACCESS pattern
@@ -1154,10 +1277,65 @@ def check_compound_primitives(findings_so_far):
         compound_findings.append({
             "check": "compound_wide_open",
             "detail": "Symbolic link + insecure device creation = accessible from any user process",
-            "score": 10
+            "score": get_weight("compound_wide_open")
         })
     
     return compound_findings
+
+
+def check_vuln_pattern_composite(findings_so_far, imports):
+    """Composite check derived from Jeff's 8 confirmed vulns.
+    
+    The pattern: IOCTL surface + dangerous primitive + missing validation.
+    This was the exact pattern in:
+    - Samsung ssudbus2: IOCTLs + USB passthrough + no input length checks
+    - ASUS AsusWmiAcpi: IOCTLs + WMI exec + missing auth on some codes
+    - ASUS AsIO3: IOCTLs + MSR/PhysMem + check-after-use auth bypass
+    - MediaTek mtkbtfilterx: IOCTLs + HCI passthrough + no validation
+    """
+    findings = []
+    check_names = {f["check"] for f in findings_so_far}
+    
+    has_ioctl = "has_ioctl_handler" in check_names or "named_device" in check_names
+    has_dangerous = bool(check_names & {
+        "msr_write", "msr_read", "physical_memory_rw", "maps_physical_memory",
+        "port_io_rw", "wmi_method_execution", "usb_request_forwarding",
+        "bt_driver_crypto", "physical_memory_section", "byovd_process_killer",
+        "unchecked_copy", "efuse_access"
+    })
+    lacks_validation = bool(check_names & {
+        "no_probe_functions", "no_auth_imports", "symlink_no_acl",
+        "insecure_device_creation"
+    })
+    
+    if has_ioctl and has_dangerous and lacks_validation:
+        findings.append({
+            "check": "vuln_pattern_composite",
+            "detail": "Matches confirmed vuln pattern: IOCTL surface + dangerous primitive + weak/no validation",
+            "score": get_weight("vuln_pattern_composite")
+        })
+    
+    return findings
+
+
+def check_whql_inbox(strings, driver_name):
+    """Detect WHQL-signed or Windows inbox drivers for stronger deprioritization.
+    
+    Microsoft-signed inbox drivers have lower base rates of exploitable vulns.
+    Stronger penalty than the basic inbox pattern check.
+    """
+    findings = []
+    
+    # Check for Microsoft as CompanyName (inbox driver)
+    company = extract_company_name(strings)
+    if company and "microsoft" in company.lower():
+        findings.append({
+            "check": "whql_signed_inbox",
+            "detail": "Microsoft-signed inbox driver (%s) - well-audited, lower priority" % company[:60],
+            "score": get_weight("whql_signed_inbox")
+        })
+    
+    return findings
 
 
 def check_hvci_compat(imports):
@@ -1168,7 +1346,7 @@ def check_hvci_compat(imports):
         findings.append({
             "check": "likely_hvci_incompatible",
             "detail": "Uses MmMapIoSpace (often HVCI incompatible)",
-            "score": 5
+            "score": get_weight("likely_hvci_incompatible")
         })
     
     return findings
@@ -1303,18 +1481,21 @@ def run():
     all_findings.extend(check_efuse_access(strings))
     all_findings.extend(check_acpi_wmi_surface(imports, strings))
     all_findings.extend(check_port_io(program))
+    # v4.2 checks
+    all_findings.extend(check_whql_inbox(strings, driver_name))
     # Compound scoring (must run last - uses results from above)
     all_findings.extend(check_compound_primitives(all_findings))
+    all_findings.extend(check_vuln_pattern_composite(all_findings, imports))
     
     total_score = sum(f["score"] for f in all_findings)
     
-    if total_score >= 120:
+    if total_score >= THRESHOLDS["CRITICAL"]:
         priority = "CRITICAL"
-    elif total_score >= 85:
+    elif total_score >= THRESHOLDS["HIGH"]:
         priority = "HIGH"
-    elif total_score >= 55:
+    elif total_score >= THRESHOLDS["MEDIUM"]:
         priority = "MEDIUM"
-    elif total_score >= 30:
+    elif total_score >= THRESHOLDS["LOW"]:
         priority = "LOW"
     else:
         priority = "SKIP"
