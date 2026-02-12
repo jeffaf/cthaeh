@@ -377,33 +377,102 @@ def explain_driver(results, driver_name):
     print()
 
 
+def detect_ghidra():
+    """Auto-detect Ghidra installation from env var or common paths."""
+    # 1. Environment variable
+    env = os.environ.get("GHIDRA_HOME")
+    if env and os.path.isdir(env):
+        return env
+    
+    # 2. Common install paths
+    candidates = []
+    if sys.platform == "win32":
+        # Windows: check C:\ghidra*, C:\Program Files\ghidra*, user home
+        for base in ["C:\\", os.path.expanduser("~"), "C:\\Program Files"]:
+            if os.path.isdir(base):
+                for d in os.listdir(base):
+                    if d.lower().startswith("ghidra"):
+                        full = os.path.join(base, d)
+                        if os.path.isdir(full):
+                            candidates.append(full)
+    else:
+        # macOS/Linux
+        for base in [os.path.expanduser("~"), "/opt", "/usr/local"]:
+            if os.path.isdir(base):
+                try:
+                    for d in os.listdir(base):
+                        if d.lower().startswith("ghidra"):
+                            full = os.path.join(base, d)
+                            if os.path.isdir(full):
+                                candidates.append(full)
+                except PermissionError:
+                    pass
+    
+    # Pick the most recent version (sort descending)
+    if candidates:
+        candidates.sort(reverse=True)
+        return candidates[0]
+    
+    return None
+
+
+def detect_cpu_count():
+    """Get a reasonable worker count (half of CPUs, min 1, max 8)."""
+    try:
+        cpus = os.cpu_count() or 2
+        return max(1, min(cpus // 2, 8))
+    except:
+        return 2
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="🌳 Cthaeh - Driver vulnerability triage scanner"
+        description="🌳 Cthaeh - Driver vulnerability triage scanner",
+        epilog="""Examples:
+  python run_triage.py C:\\drivers                    # Scan with smart defaults
+  python run_triage.py C:\\drivers --no-prefilter     # Skip pre-filter
+  python run_triage.py --single C:\\path\\to\\driver.sys
+  python run_triage.py --explain amdfendr.sys        # Explain existing results
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--drivers-dir", help="Directory containing .sys files")
+    parser.add_argument("drivers_dir", nargs="?", default=None,
+                        help="Directory containing .sys files (positional)")
+    parser.add_argument("--drivers-dir", dest="drivers_dir_flag",
+                        help="Directory containing .sys files (flag, same as positional)")
     parser.add_argument("--single", help="Single .sys file to analyze")
-    parser.add_argument("--ghidra", help="Path to Ghidra installation (required for scanning)")
-    parser.add_argument("--output", default="triage_results.csv", help="Output CSV path")
+    parser.add_argument("--ghidra", help="Path to Ghidra install (auto-detects from GHIDRA_HOME or common paths)")
+    parser.add_argument("--output", default="triage_results.csv", help="Output CSV path (default: triage_results.csv)")
     parser.add_argument("--max", type=int, default=0, help="Max drivers to analyze (0=all)")
-    parser.add_argument("--workers", type=int, default=1,
-                        help="Parallel Ghidra instances (default: 1)")
-    parser.add_argument("--prefilter", action="store_true",
-                        help="Run pefile pre-filter to skip uninteresting drivers")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="Parallel Ghidra instances (default: auto = half CPUs)")
+    parser.add_argument("--no-prefilter", action="store_true",
+                        help="Disable pefile pre-filter (on by default)")
     parser.add_argument("--max-size", type=int, default=5,
                         help="Max driver size in MB for pre-filter (default: 5)")
-    parser.add_argument("--json-output", help="Write full results with all findings to JSON file")
-    parser.add_argument("--report", help="Generate markdown report (specify output .md path)")
+    parser.add_argument("--no-json", action="store_true",
+                        help="Disable JSON output (on by default as triage_results.json)")
+    parser.add_argument("--json-output", help="JSON output path (default: triage_results.json)")
+    parser.add_argument("--no-report", action="store_true",
+                        help="Disable markdown report (on by default as triage_report.md)")
+    parser.add_argument("--report", help="Markdown report path (default: triage_report.md)")
     parser.add_argument("--report-top", type=int, default=20,
                         help="Number of top drivers to include in report (default: 20)")
     parser.add_argument("--explain", help="Show detailed scoring breakdown for a specific driver (by name)")
     
     args = parser.parse_args()
     
+    # Merge positional and flag versions of drivers_dir
+    drivers_dir = args.drivers_dir or args.drivers_dir_flag
+    
+    # Smart defaults for outputs
+    json_output = args.json_output or ("" if args.no_json else "triage_results.json")
+    report_output = args.report or ("" if args.no_report else "triage_report.md")
+    
     # --explain can work with existing JSON results (no scan needed)
-    if args.explain and not args.drivers_dir and not args.single:
+    if args.explain and not drivers_dir and not args.single:
         json_candidates = [
-            args.json_output,
+            json_output,
             "triage_results.json",
             os.path.expanduser("~/triage_results.json"),
         ]
@@ -416,11 +485,19 @@ def main():
         print("ERROR: No triage_results.json found. Run a scan first or specify --json-output.")
         return
     
-    if not args.drivers_dir and not args.single:
-        parser.error("Must specify --drivers-dir or --single")
+    if not drivers_dir and not args.single:
+        parser.error("Must specify a drivers directory or --single")
     
-    if not args.ghidra:
-        parser.error("--ghidra is required for scanning")
+    # Auto-detect Ghidra
+    ghidra_path = args.ghidra or detect_ghidra()
+    if not ghidra_path:
+        parser.error("Could not find Ghidra. Set GHIDRA_HOME env var or use --ghidra")
+    
+    # Auto-detect worker count
+    workers = args.workers if args.workers > 0 else detect_cpu_count()
+    
+    # Prefilter is ON by default now
+    use_prefilter = not args.no_prefilter
     
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "driver_triage.py")
     
@@ -428,22 +505,26 @@ def main():
         print(f"ERROR: Triage script not found at {script_path}")
         sys.exit(1)
     
+    print(f"Ghidra: {ghidra_path}")
+    print(f"Workers: {workers}")
+    print(f"Pre-filter: {'on' if use_prefilter else 'off'}")
+    print()
+    
     # Find drivers
     if args.single:
         drivers = [args.single]
     else:
-        # Pre-filter if requested
-        if args.prefilter:
-            print(f"Running pre-filter on {args.drivers_dir}...")
-            filtered = run_prefilter(args.drivers_dir, args.max_size)
+        if use_prefilter:
+            print(f"Running pre-filter on {drivers_dir}...")
+            filtered = run_prefilter(drivers_dir, args.max_size)
             if filtered is not None:
                 drivers = filtered
             else:
-                print(f"Scanning {args.drivers_dir} for .sys files...")
-                drivers = find_sys_files(args.drivers_dir)
+                print(f"Scanning {drivers_dir} for .sys files...")
+                drivers = find_sys_files(drivers_dir)
         else:
-            print(f"Scanning {args.drivers_dir} for .sys files...")
-            drivers = find_sys_files(args.drivers_dir)
+            print(f"Scanning {drivers_dir} for .sys files...")
+            drivers = find_sys_files(drivers_dir)
     
     if not drivers:
         print("No .sys files found!")
@@ -460,19 +541,19 @@ def main():
     start_time = time.time()
     
     # Run analysis
-    if args.workers > 1 and len(drivers) > 1:
-        results = run_parallel(drivers, args.ghidra, script_path, project_dir, args.workers)
+    if workers > 1 and len(drivers) > 1:
+        results = run_parallel(drivers, ghidra_path, script_path, project_dir, workers)
     else:
-        results = run_sequential(drivers, args.ghidra, script_path, project_dir)
+        results = run_sequential(drivers, ghidra_path, script_path, project_dir)
     
     elapsed = time.time() - start_time
     
     if results:
         write_csv(results, args.output)
-        if args.json_output:
-            write_json(results, args.json_output)
-        if args.report:
-            write_report(results, args.report, args.report_top)
+        if json_output:
+            write_json(results, json_output)
+        if report_output:
+            write_report(results, report_output, args.report_top)
         print_summary(results)
     
     if args.explain and results:
