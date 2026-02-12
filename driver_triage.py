@@ -122,6 +122,16 @@ WEIGHTS = {
 
     # WHQL-signed / inbox penalty (stronger negative scoring)
     "whql_signed_inbox": -20,
+
+    # v4.3: research-driven additions
+    "wdf_device_interface": -15,   # WDF + device interface = SDDL-protected (nvpcf FP lesson)
+    "wdm_direct_device": 10,       # WDM + IoCreateDevice = weaker security model
+    "uefi_variable_access": 15,    # ExGetFirmwareEnvironmentVariable = UEFI manipulation
+    "hardcoded_crypto_key": 10,    # Hardcoded keys/seeds for firmware decryption
+    "hci_command_passthrough": 20, # Raw HCI command passthrough to BT hardware
+    "urb_from_user_input": 20,     # USB Request Block built from user-controlled data
+    "no_inputbuffer_length_check": 15,  # Missing InputBufferLength validation before parsing
+    "previousmode_relevant": 0,    # Informational: PreviousMode attack surface (new mitigation in 24H2)
 }
 
 # Scoring thresholds
@@ -1318,6 +1328,169 @@ def check_vuln_pattern_composite(findings_so_far, imports):
     return findings
 
 
+def check_wdf_vs_wdm(imports, strings):
+    """Detect WDF vs WDM driver framework and adjust scoring.
+    
+    From research: nvpcf.sys (WDF) scored 200+ but was FP because WDF device 
+    interfaces inherit SDDL security descriptors that block non-admin access,
+    even without explicit auth checks in driver code.
+    
+    WDM drivers using IoCreateDevice (not Secure) are higher risk because
+    they rely on default DACLs that allow any local user access.
+    """
+    findings = []
+    
+    # WDF indicators
+    wdf_imports = {"wdfversionbind", "wdfversionunbind", "wdfversionbindclass",
+                   "wdfdrivercreate", "wdfdevicecreate", "wdfdevicecreatedeviceinterface"}
+    has_wdf = bool(imports & wdf_imports)
+    
+    # Also check strings for WDF patterns
+    if not has_wdf:
+        has_wdf = any("wdf" in s.lower() and ("driver" in s.lower() or "device" in s.lower()) for s in strings[:100])
+    
+    # Device interface (WDF typically uses these, which have SDDL security)
+    has_device_interface = any("deviceinterface" in s.lower() or 
+                               "{" in s and "}" in s and "-" in s  # GUID pattern
+                               for s in strings[:200])
+    
+    has_create_device = "iocreatedevice" in imports
+    has_create_secure = "iocreatedevicesecure" in imports
+    
+    if has_wdf and has_device_interface:
+        findings.append({
+            "check": "wdf_device_interface",
+            "detail": "WDF driver with device interface (likely SDDL-protected, harder to access from unprivileged user)",
+            "score": get_weight("wdf_device_interface")
+        })
+    elif has_create_device and not has_create_secure and not has_wdf:
+        findings.append({
+            "check": "wdm_direct_device",
+            "detail": "WDM driver using IoCreateDevice (default DACL, easier user-mode access)",
+            "score": get_weight("wdm_direct_device")
+        })
+    
+    return findings
+
+
+def check_uefi_access(imports):
+    """Detect UEFI variable access capability.
+    
+    From research: MediaTek mtkbtfilterx imports ExGetFirmwareEnvironmentVariable.
+    UEFI variable access from a driver can enable Secure Boot manipulation,
+    firmware persistence, and boot configuration changes.
+    """
+    findings = []
+    
+    uefi_imports = {"exgetfirmwareenvironmentvariable", "exsetfirmwareenvironmentvariable",
+                    "zwquerysystemenvironmentvalue", "zwsetsystemenvironmentvalue",
+                    "zwquerysystemenvironmentvalueex", "zwsetsystemenvironmentvalueex"}
+    found = imports & uefi_imports
+    
+    if found:
+        has_write = bool(found & {"exsetfirmwareenvironmentvariable", 
+                                   "zwsetsystemenvironmentvalue",
+                                   "zwsetsystemenvironmentvalueex"})
+        if has_write:
+            findings.append({
+                "check": "uefi_variable_access",
+                "detail": "UEFI variable WRITE capability: %s (firmware persistence, Secure Boot manipulation)" % ", ".join(found),
+                "score": get_weight("uefi_variable_access") + 5  # Extra for write
+            })
+        else:
+            findings.append({
+                "check": "uefi_variable_access",
+                "detail": "UEFI variable read: %s (can read firmware config, boot variables)" % ", ".join(found),
+                "score": get_weight("uefi_variable_access")
+            })
+    
+    return findings
+
+
+def check_hardcoded_crypto(strings):
+    """Detect hardcoded cryptographic keys or seeds.
+    
+    From research: MediaTek mtkbtfilterx uses hardcoded SHA1 seed for
+    AES-128 key derivation to decrypt firmware. Hardcoded crypto material
+    means firmware decryption can be replicated, enabling malicious firmware injection.
+    """
+    findings = []
+    
+    # Look for crypto-related strings that suggest hardcoded key material
+    crypto_indicators = ["aes", "sha1", "sha256", "hmac", "decrypt", "encrypt",
+                         "gen_key", "key_deriv", "hardcoded", "secret"]
+    
+    # Long hex strings that look like keys (32+ hex chars)
+    import re
+    hex_key_pattern = re.compile(r'[0-9a-fA-F]{32,}')
+    
+    key_strings = []
+    for s in strings:
+        s_lower = s.lower()
+        # Function names suggesting key generation
+        if any(ind in s_lower for ind in ["gen_key", "genkey", "key_gen", "keygen", 
+                                           "decrypt_file", "decryptfile", "init_key"]):
+            key_strings.append(s[:60])
+        # Long hex strings (potential embedded keys)
+        if hex_key_pattern.search(s) and len(s) > 32 and len(s) < 128:
+            key_strings.append(s[:60])
+    
+    if key_strings:
+        findings.append({
+            "check": "hardcoded_crypto_key",
+            "detail": "Potential hardcoded crypto material: %s (firmware decryption key recovery)" % "; ".join(key_strings[:3]),
+            "score": get_weight("hardcoded_crypto_key")
+        })
+    
+    return findings
+
+
+def check_urb_construction(imports, strings):
+    """Detect USB Request Block (URB) construction from user input.
+    
+    From research: Samsung ssudbus2 builds URBs directly from user-supplied 
+    IOCTL input data. TransferBufferLength set from user-controlled wLength
+    without validation against SystemBuffer size = pool overflow.
+    
+    Pattern: USB driver + IRP handling + internal USB IOCTLs = URB passthrough.
+    """
+    findings = []
+    
+    # USB submission imports
+    usb_submit = {"usbd_createconfigurationrequestex", "usbd_selectconfigurb",
+                  "usbd_createhandle"}
+    internal_usb = any("ioctl_internal_usb" in s.lower() for s in strings)
+    
+    has_irp = "iofcompleterequest" in imports or "iocompleterequest" in imports
+    has_usb = bool(imports & usb_submit) or internal_usb
+    
+    # URB-related strings
+    urb_strings = [s for s in strings if "urb" in s.lower() and 
+                   any(x in s.lower() for x in ["transfer", "buffer", "control", "vendor", "class"])]
+    
+    if has_usb and has_irp and ("iocalldriver" in imports or "iofcalldriver" in imports):
+        detail = "USB driver builds URBs and forwards to lower stack"
+        if urb_strings:
+            detail += " (URB strings: %s)" % "; ".join(urb_strings[:2])
+        findings.append({
+            "check": "urb_from_user_input",
+            "detail": detail,
+            "score": get_weight("urb_from_user_input")
+        })
+    
+    # HCI command passthrough (BT-specific, from MediaTek research)
+    hci_strings = [s for s in strings if "hci" in s.lower() and 
+                   any(x in s.lower() for x in ["cmd", "command", "send", "handler"])]
+    if hci_strings and has_irp:
+        findings.append({
+            "check": "hci_command_passthrough",
+            "detail": "HCI command passthrough detected: %s (raw BT hardware control from userspace)" % "; ".join(hci_strings[:2]),
+            "score": get_weight("hci_command_passthrough")
+        })
+    
+    return findings
+
+
 def check_whql_inbox(strings, driver_name):
     """Detect WHQL-signed or Windows inbox drivers for stronger deprioritization.
     
@@ -1483,6 +1656,11 @@ def run():
     all_findings.extend(check_port_io(program))
     # v4.2 checks
     all_findings.extend(check_whql_inbox(strings, driver_name))
+    # v4.3 checks (from deep research review: Samsung, MediaTek, NVIDIA FP lesson, PreviousMode blog)
+    all_findings.extend(check_wdf_vs_wdm(imports, strings))
+    all_findings.extend(check_uefi_access(imports))
+    all_findings.extend(check_hardcoded_crypto(strings))
+    all_findings.extend(check_urb_construction(imports, strings))
     # Compound scoring (must run last - uses results from above)
     all_findings.extend(check_compound_primitives(all_findings))
     all_findings.extend(check_vuln_pattern_composite(all_findings, imports))
