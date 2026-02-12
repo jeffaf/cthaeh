@@ -52,7 +52,7 @@ KNOWN_FPS = {
 # Score should be reasonable (not astronomical)
 SANITY_CHECKS = {
     "max_possible_score": 500,  # No driver should score above this
-    "critical_percentage_max": 10,  # CRITICAL should be <10% of all drivers
+    "critical_percentage_max": 5,  # CRITICAL should be <5% of all drivers
 }
 
 
