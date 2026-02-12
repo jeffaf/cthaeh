@@ -11,10 +11,26 @@
 
 import json
 import re
+import os
 
 # Ghidra imports (available in Ghidra scripting environment)
 from ghidra.program.model.symbol import SourceType
 from ghidra.program.util import DefinedDataIterator
+
+
+# --- Known FP / Skip List ---
+def load_known_fp():
+    """Load known false positives / already-investigated drivers."""
+    fp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_fp.json")
+    try:
+        with open(fp_path, "r") as f:
+            data = json.load(f)
+            return data.get("skip_drivers", {})
+    except:
+        return {}
+
+
+KNOWN_FP = load_known_fp()
 
 
 def get_imports(program):
@@ -596,18 +612,76 @@ INBOX_DRIVER_PATTERNS = [
 ]
 
 
-def check_vendor_context(strings, driver_name):
-    """Score based on vendor CNA status and bounty availability."""
-    findings = []
-    driver_lower = driver_name.lower()
-    all_text = " ".join(strings).lower() + " " + driver_lower
-    
-    # Use sorted keys for deterministic matching across Jython/CPython
-    matched_vendor = None
-    for vendor in sorted(CNA_BOUNTY_VENDORS.keys()):
-        if vendor in all_text:
-            matched_vendor = (vendor, CNA_BOUNTY_VENDORS[vendor])
+def extract_company_name(strings):
+    """Extract actual CompanyName from version info strings."""
+    company = None
+    for i, s in enumerate(strings):
+        s_lower = s.lower()
+        if "companyname" in s_lower:
+            # CompanyName is often the next string, or embedded in the same one
+            # Try to extract the value after "CompanyName"
+            parts = s.split("CompanyName")
+            if len(parts) > 1 and len(parts[1].strip()) > 2:
+                company = parts[1].strip().strip("\x00").strip()
+            elif i + 1 < len(strings) and len(strings[i + 1].strip()) > 2:
+                company = strings[i + 1].strip()
             break
+    return company
+
+
+# Map known driver name prefixes to vendors (higher priority than string search)
+DRIVER_VENDOR_MAP = {
+    "nvpcf": "nvidia", "nvraid": "nvidia", "nvlddmkm": "nvidia", "nvstor": "nvidia",
+    "nvaudio": "nvidia", "nvhda": "nvidia",
+    "amd": "amd", "atikmdag": "amd", "atikmpag": "amd",
+    "asus": "asus", "asussaio": "asus",
+    "ssud": "samsung",
+    "bcmwl": "broadcom", "bcm43": "broadcom",
+    "igdkmd": "intel", "iaxnvme": "intel", "iastor": "intel", "iaxhci": "intel",
+    "qc": "qualcomm", "qcwlan": "qualcomm",
+    "mtk": "mediatek", "mtkwl": "mediatek",
+    "len": "lenovo", "lnvhswfx": "lenovo",
+    "hp": "hp", "hpqkb": "hp",
+    "dell": "dell",
+    "athw": "qualcomm", "atheros": "qualcomm", "ath6": "qualcomm",
+}
+
+
+def check_vendor_context(strings, driver_name):
+    """Score based on vendor CNA status and bounty availability.
+    
+    Priority: driver name prefix > CompanyName string > all strings.
+    Prevents false vendor attribution (e.g., nvpcf.sys matched 'amd').
+    """
+    findings = []
+    driver_lower = driver_name.lower().replace(".sys", "")
+    
+    # 1. Try driver name prefix match first (most reliable)
+    matched_vendor = None
+    for prefix in sorted(DRIVER_VENDOR_MAP.keys(), key=len, reverse=True):
+        if driver_lower.startswith(prefix):
+            vendor_key = DRIVER_VENDOR_MAP[prefix]
+            if vendor_key in CNA_BOUNTY_VENDORS:
+                matched_vendor = (vendor_key, CNA_BOUNTY_VENDORS[vendor_key])
+            break
+    
+    # 2. Try CompanyName from version info
+    if not matched_vendor:
+        company = extract_company_name(strings)
+        if company:
+            company_lower = company.lower()
+            for vendor in sorted(CNA_BOUNTY_VENDORS.keys()):
+                if vendor in company_lower:
+                    matched_vendor = (vendor, CNA_BOUNTY_VENDORS[vendor])
+                    break
+    
+    # 3. Fallback: scan all strings (least reliable, kept for coverage)
+    if not matched_vendor:
+        all_text = " ".join(strings).lower()
+        for vendor in sorted(CNA_BOUNTY_VENDORS.keys()):
+            if vendor in all_text:
+                matched_vendor = (vendor, CNA_BOUNTY_VENDORS[vendor])
+                break
     
     if matched_vendor:
         vendor_name, info = matched_vendor
@@ -666,18 +740,28 @@ def check_driver_class(strings, driver_name):
 
 
 def check_large_ioctl_surface(program):
-    """Detect drivers with many distinct IOCTL codes (large attack surface)."""
+    """Detect drivers with many distinct IOCTL codes (large attack surface).
+    
+    Uses reachability heuristic: only counts IOCTL codes that appear in
+    CMP/SUB/AND/TEST instructions (likely dispatch switch cases) rather
+    than all constants that look like IOCTLs.
+    """
     findings = []
     listing = program.getListing()
     func_mgr = program.getFunctionManager()
     
-    ioctl_codes = set()
+    ioctl_codes_all = set()
+    ioctl_codes_dispatched = set()
+    
+    # Instructions that indicate an IOCTL is being compared/dispatched
+    DISPATCH_MNEMONICS = {"cmp", "sub", "and", "test", "xor", "je", "jne", "jz", "jnz"}
     
     for func in func_mgr.getFunctions(True):
         body = func.getBody()
         inst_iter = listing.getInstructions(body, True)
         while inst_iter.hasNext():
             inst = inst_iter.next()
+            mnemonic = inst.getMnemonicString().lower()
             for i in range(inst.getNumOperands()):
                 try:
                     scalar = inst.getScalar(i)
@@ -689,27 +773,39 @@ def check_large_ioctl_surface(program):
                         device_type = (val >> 16) & 0xFFFF
                         # Valid device types: <0x100 (MS defined) or >=0x8000 (vendor)
                         if device_type < 0x100 or device_type >= 0x8000:
-                            ioctl_codes.add(val)
+                            ioctl_codes_all.add(val)
+                            if mnemonic in DISPATCH_MNEMONICS:
+                                ioctl_codes_dispatched.add(val)
                 except:
                     pass
     
-    if len(ioctl_codes) > 50:
+    # Use dispatched count for scoring (more accurate), report both
+    dispatched = len(ioctl_codes_dispatched)
+    total = len(ioctl_codes_all)
+    
+    if dispatched > 50:
         findings.append({
             "check": "massive_ioctl_surface",
-            "detail": "Massive IOCTL surface: %d distinct codes detected" % len(ioctl_codes),
+            "detail": "Massive IOCTL surface: %d dispatched / %d total codes detected" % (dispatched, total),
             "score": 15
         })
-    elif len(ioctl_codes) > 25:
+    elif dispatched > 25:
         findings.append({
             "check": "large_ioctl_surface",
-            "detail": "Large IOCTL surface: %d distinct codes detected" % len(ioctl_codes),
+            "detail": "Large IOCTL surface: %d dispatched / %d total codes detected" % (dispatched, total),
             "score": 10
         })
-    elif len(ioctl_codes) > 10:
+    elif dispatched > 10:
         findings.append({
             "check": "moderate_ioctl_surface",
-            "detail": "Moderate IOCTL surface: %d distinct codes detected" % len(ioctl_codes),
+            "detail": "Moderate IOCTL surface: %d dispatched / %d total codes detected" % (dispatched, total),
             "score": 5
+        })
+    elif total > 10 and dispatched <= 10:
+        findings.append({
+            "check": "ioctl_constants_only",
+            "detail": "%d IOCTL-like constants found but only %d in dispatch context (may be internal)" % (total, dispatched),
+            "score": 0
         })
     
     return findings
@@ -741,6 +837,62 @@ def check_device_interface(strings):
     return findings
 
 
+def check_loldrivers(driver_name):
+    """Cross-reference against LOLDrivers known-abused list.
+    
+    Uses a local cache of loldrivers.io data. If not available,
+    falls back to driver name matching against known entries.
+    """
+    findings = []
+    driver_lower = driver_name.lower()
+    
+    # Check local LOLDrivers cache
+    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loldrivers_cache.json")
+    try:
+        with open(cache_path, "r") as f:
+            lol_data = json.load(f)
+            if driver_lower in lol_data:
+                entry = lol_data[driver_lower]
+                findings.append({
+                    "check": "loldrivers_known",
+                    "detail": "Listed in LOLDrivers: %s (already documented, skip unless new vuln class)" % entry.get("description", "known vulnerable")[:80],
+                    "score": -20  # Deprioritize already-documented drivers
+                })
+                return findings
+    except:
+        pass
+    
+    # Fallback: well-known LOLDrivers by name (partial list of most common)
+    KNOWN_LOLDRIVERS = {
+        "dbutil_2_3.sys": "Dell BIOS utility - CVE-2021-21551",
+        "rtcore64.sys": "MSI Afterburner - CVE-2019-16098",
+        "gdrv.sys": "GIGABYTE - arbitrary R/W",
+        "asio64.sys": "ASRock - arbitrary R/W",
+        "aswarpot.sys": "Avast - process killer",
+        "procexp152.sys": "Process Explorer - legitimate but abused",
+        "cpuz141.sys": "CPU-Z - MSR/PhysMem access",
+        "winring0x64.sys": "WinRing0 - MSR/PhysMem/IO",
+        "ene.sys": "ENE Technology - arbitrary R/W",
+        "asio3.sys": "ASUS AsIO3 - CVE-2025-3464",
+        "physmem.sys": "Physical memory access",
+        "inpoutx64.sys": "InpOut - port I/O",
+        "winio64.sys": "WinIO - port I/O",
+        "speedfan.sys": "SpeedFan - MSR/PhysMem",
+        "rtkiow8x64.sys": "Realtek I/O - arbitrary R/W",
+        "bs_def64.sys": "Biostar - MSR R/W",
+        "elrawdsk.sys": "EldoS RawDisk - raw disk access",
+    }
+    
+    if driver_lower in KNOWN_LOLDRIVERS:
+        findings.append({
+            "check": "loldrivers_known",
+            "detail": "Known LOLDriver: %s (already documented, deprioritize)" % KNOWN_LOLDRIVERS[driver_lower],
+            "score": -20
+        })
+    
+    return findings
+
+
 def check_hvci_compat(imports):
     """Check if driver is HVCI compatible."""
     findings = []
@@ -756,7 +908,7 @@ def check_hvci_compat(imports):
 
 
 def get_driver_info(program):
-    """Extract basic driver metadata."""
+    """Extract basic driver metadata including parsed version info."""
     info = {
         "name": program.getName(),
         "path": program.getExecutablePath(),
@@ -768,10 +920,44 @@ def get_driver_info(program):
     }
     
     strings = get_strings(program)
-    for s in strings:
-        if "CompanyName" in s or "FileDescription" in s or "ProductName" in s:
-            info["version_string"] = s[:200]
-            break
+    
+    # Parse VS_VERSION_INFO fields
+    version_fields = {}
+    VS_KEYS = ["CompanyName", "FileDescription", "FileVersion", "InternalName",
+                "LegalCopyright", "OriginalFilename", "ProductName", "ProductVersion"]
+    
+    for i, s in enumerate(strings):
+        for key in VS_KEYS:
+            if key in s:
+                # Value is often embedded after the key or is the next string
+                parts = s.split(key)
+                if len(parts) > 1:
+                    val = parts[1].strip().strip("\x00").strip()
+                    if len(val) > 1:
+                        version_fields[key] = val[:100]
+                # Also check next string as the value
+                if i + 1 < len(strings):
+                    next_s = strings[i + 1].strip()
+                    if next_s and len(next_s) > 1 and key not in next_s:
+                        if key not in version_fields:
+                            version_fields[key] = next_s[:100]
+    
+    if version_fields:
+        info["version_info"] = version_fields
+        # Set readable summary
+        company = version_fields.get("CompanyName", "")
+        product = version_fields.get("ProductName", version_fields.get("FileDescription", ""))
+        version = version_fields.get("FileVersion", version_fields.get("ProductVersion", ""))
+        summary_parts = [p for p in [company, product, version] if p]
+        if summary_parts:
+            info["version_summary"] = " | ".join(summary_parts)
+    
+    # Fallback to old method
+    if "version_info" not in info:
+        for s in strings:
+            if "CompanyName" in s or "FileDescription" in s or "ProductName" in s:
+                info["version_string"] = s[:200]
+                break
     
     return info
 
@@ -787,6 +973,29 @@ def run():
     imports = get_imports(program)
     strings = get_strings(program)
     driver_info = get_driver_info(program)
+    driver_name = driver_info.get("name", "")
+    
+    # Check known FP / already-investigated list
+    skip_reason = KNOWN_FP.get(driver_name)
+    if skip_reason:
+        result = {
+            "driver": driver_info,
+            "score": 0,
+            "priority": "KNOWN_FP",
+            "skip_reason": skip_reason,
+            "findings_count": 0,
+            "findings": [{
+                "check": "known_fp",
+                "detail": skip_reason,
+                "score": 0
+            }],
+            "import_count": len(imports),
+            "string_count": len(strings),
+        }
+        print("===TRIAGE_START===")
+        print(json.dumps(result, indent=2))
+        print("===TRIAGE_END===")
+        return
     
     all_findings = []
     all_findings.extend(check_device_creation(imports, strings))
@@ -799,6 +1008,8 @@ def run():
     all_findings.extend(check_physical_memory(imports))
     all_findings.extend(check_device_interface(strings))
     all_findings.extend(check_hvci_compat(imports))
+    # LOLDrivers cross-reference
+    all_findings.extend(check_loldrivers(driver_name))
     # New checks (v2)
     all_findings.extend(check_msr_access(program))
     all_findings.extend(check_cr_access(program))
@@ -814,8 +1025,8 @@ def run():
     all_findings.extend(check_unchecked_copy(imports, program))
     all_findings.extend(check_internal_validation(imports))
     # New checks (v3.2 - vendor/class context)
-    all_findings.extend(check_vendor_context(strings, driver_info.get("name", "")))
-    all_findings.extend(check_driver_class(strings, driver_info.get("name", "")))
+    all_findings.extend(check_vendor_context(strings, driver_name))
+    all_findings.extend(check_driver_class(strings, driver_name))
     all_findings.extend(check_large_ioctl_surface(program))
     
     total_score = sum(f["score"] for f in all_findings)

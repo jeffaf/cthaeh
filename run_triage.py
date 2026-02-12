@@ -247,6 +247,81 @@ def run_parallel(drivers, ghidra_path, script_path, project_dir, workers):
     return results
 
 
+def write_report(results, output_path, top_n=20):
+    """Generate a markdown triage report for top candidates."""
+    results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    
+    total = len(results)
+    critical = sum(1 for r in results if r.get("priority") == "CRITICAL")
+    high = sum(1 for r in results if r.get("priority") == "HIGH")
+    medium = sum(1 for r in results if r.get("priority") == "MEDIUM")
+    low = sum(1 for r in results if r.get("priority") == "LOW")
+    skip = sum(1 for r in results if r.get("priority") == "SKIP")
+    known_fp = sum(1 for r in results if r.get("priority") == "KNOWN_FP")
+    
+    PRIORITY_EMOJI = {
+        "CRITICAL": "💀", "HIGH": "🔴", "MEDIUM": "🟡",
+        "LOW": "🟢", "SKIP": "⚪", "KNOWN_FP": "🚫"
+    }
+    
+    lines = []
+    lines.append("# Cthaeh Triage Report")
+    lines.append("")
+    lines.append(f"**Generated:** {time.strftime('%Y-%m-%d %H:%M')}")
+    lines.append(f"**Drivers analyzed:** {total}")
+    lines.append("")
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(f"- 💀 CRITICAL: {critical}")
+    lines.append(f"- 🔴 HIGH: {high}")
+    lines.append(f"- 🟡 MEDIUM: {medium}")
+    lines.append(f"- 🟢 LOW: {low}")
+    lines.append(f"- ⚪ SKIP: {skip}")
+    if known_fp:
+        lines.append(f"- 🚫 Known FP/Investigated: {known_fp}")
+    lines.append("")
+    lines.append(f"## Top {top_n} Candidates")
+    lines.append("")
+    
+    for i, r in enumerate(results[:top_n], 1):
+        driver = r.get("driver", {})
+        name = driver.get("name", "unknown")
+        score = r.get("score", 0)
+        priority = r.get("priority", "?")
+        emoji = PRIORITY_EMOJI.get(priority, "❓")
+        version_summary = driver.get("version_summary", "")
+        skip_reason = r.get("skip_reason", "")
+        
+        lines.append(f"### {i}. {emoji} {name} (Score: {score}, {priority})")
+        lines.append("")
+        
+        if skip_reason:
+            lines.append(f"> **Skipped:** {skip_reason}")
+            lines.append("")
+            continue
+        
+        if version_summary:
+            lines.append(f"**Vendor/Product:** {version_summary}")
+        lines.append(f"**Size:** {driver.get('size', 0):,} bytes | **Functions:** {driver.get('function_count', 0)}")
+        lines.append("")
+        
+        # Group findings by score (high to low), skip zero-score
+        findings = sorted(r.get("findings", []), key=lambda x: x["score"], reverse=True)
+        scored_findings = [f for f in findings if f["score"] != 0]
+        
+        if scored_findings:
+            lines.append("**Key findings:**")
+            for f in scored_findings:
+                score_str = f"+{f['score']}" if f["score"] > 0 else str(f["score"])
+                lines.append(f"- [{score_str}] {f['detail']}")
+            lines.append("")
+    
+    with open(output_path, "w") as f:
+        f.write("\n".join(lines))
+    
+    print(f"Markdown report written to: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="🌳 Cthaeh - Driver vulnerability triage scanner"
@@ -263,6 +338,9 @@ def main():
     parser.add_argument("--max-size", type=int, default=5,
                         help="Max driver size in MB for pre-filter (default: 5)")
     parser.add_argument("--json-output", help="Write full results with all findings to JSON file")
+    parser.add_argument("--report", help="Generate markdown report (specify output .md path)")
+    parser.add_argument("--report-top", type=int, default=20,
+                        help="Number of top drivers to include in report (default: 20)")
     
     args = parser.parse_args()
     
@@ -318,6 +396,8 @@ def main():
         write_csv(results, args.output)
         if args.json_output:
             write_json(results, args.json_output)
+        if args.report:
+            write_report(results, args.report, args.report_top)
         print_summary(results)
     
     print(f"\nCompleted in {elapsed:.1f}s ({elapsed/max(len(drivers),1):.1f}s per driver)")
