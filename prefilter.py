@@ -333,10 +333,17 @@ def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=F
         reason = entry.pop("_reason")
 
         # Track special categories
-        if any(f.startswith("KNOWN_VULN") for f in entry["flags"]):
+        is_known_vuln = any(f.startswith("KNOWN_VULN") for f in entry["flags"])
+        if is_known_vuln:
             results["known_vuln"].append(entry)
         if "BYOVD_CANDIDATE" in entry["flags"]:
             results["byovd_candidates"].append(entry)
+
+        # Skip known LOLDrivers — we're hunting 0-days, not rediscovering old bugs
+        if is_known_vuln:
+            entry["skip_reason"] = "known vulnerable (LOLDrivers) — skipping for novel research"
+            results["skip"].append(entry)
+            continue
 
         if should_analyze:
             # In BYOVD-only mode, only keep BYOVD candidates
