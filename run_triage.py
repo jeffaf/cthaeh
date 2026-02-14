@@ -178,55 +178,33 @@ def print_summary(results):
             print(f"  {i:2d}. [{r.get('priority', '?'):6s}] {r.get('score', 0):3d} pts  {driver.get('name', '?')}")
 
 
-def run_sequential(drivers, ghidra_path, script_path, project_dir):
-    """Run analysis sequentially (original behavior)."""
-    results = []
-    
-    for i, driver_path in enumerate(drivers, 1):
-        driver_name = os.path.basename(driver_path)
-        print(f"[{i}/{len(drivers)}] {driver_name}...", end="", flush=True)
-        
-        args_tuple = (ghidra_path, driver_path, script_path, project_dir, 0)
-        result, error = run_ghidra_analysis(args_tuple)
-        
-        if result:
-            results.append(result)
-            score = result.get("score", 0)
-            priority = result.get("priority", "?")
-            print(f" {priority} ({score} pts)")
-        else:
-            print(f" FAILED ({error})")
-    
-    return results
-
-
-def run_parallel(drivers, ghidra_path, script_path, project_dir, workers):
-    """Run analysis in parallel with multiple Ghidra instances."""
+def run_analysis(drivers, ghidra_path, script_path, project_dir, workers=1, json_output=None):
+    """Run analysis with 1+ workers. Streams results to JSON as they complete."""
     results = []
     failed = 0
     completed = 0
     total = len(drivers)
-    
+
     # Build args tuples with worker IDs (round-robin assignment)
     args_list = [
-        (ghidra_path, driver_path, script_path, project_dir, i % workers)
+        (ghidra_path, driver_path, script_path, project_dir, i % max(workers, 1))
         for i, driver_path in enumerate(drivers)
     ]
-    
-    print(f"Running with {workers} parallel workers...\n")
-    
+
+    if workers > 1:
+        print(f"Running with {workers} parallel workers...\n")
+
     with ProcessPoolExecutor(max_workers=workers) as executor:
-        # Submit all jobs
         future_to_driver = {
             executor.submit(run_ghidra_analysis, args): args[1]
             for args in args_list
         }
-        
+
         for future in as_completed(future_to_driver):
             driver_path = future_to_driver[future]
             driver_name = os.path.basename(driver_path)
             completed += 1
-            
+
             try:
                 result, error = future.result()
                 if result:
@@ -234,17 +212,30 @@ def run_parallel(drivers, ghidra_path, script_path, project_dir, workers):
                     score = result.get("score", 0)
                     priority = result.get("priority", "?")
                     print(f"[{completed}/{total}] {driver_name}... {priority} ({score} pts)")
+                    # Stream results to JSON as they complete
+                    if json_output:
+                        _stream_json(results, json_output)
                 else:
                     failed += 1
                     print(f"[{completed}/{total}] {driver_name}... FAILED ({error})")
             except Exception as e:
                 failed += 1
                 print(f"[{completed}/{total}] {driver_name}... ERROR ({e})")
-    
+
     if failed:
         print(f"\n{failed} driver(s) failed analysis")
-    
+
     return results
+
+
+def _stream_json(results, output_path):
+    """Write current results to JSON (called after each completion for crash recovery)."""
+    try:
+        sorted_results = sorted(results, key=lambda x: x.get("score", 0), reverse=True)
+        with open(output_path, "w") as f:
+            json.dump(sorted_results, f, indent=2)
+    except Exception:
+        pass  # Don't fail the scan over a write error
 
 
 def write_report(results, output_path, top_n=20):
@@ -550,10 +541,7 @@ def main():
     start_time = time.time()
     
     # Run analysis
-    if workers > 1 and len(drivers) > 1:
-        results = run_parallel(drivers, ghidra_path, script_path, project_dir, workers)
-    else:
-        results = run_sequential(drivers, ghidra_path, script_path, project_dir)
+    results = run_analysis(drivers, ghidra_path, script_path, project_dir, workers, json_output)
     
     elapsed = time.time() - start_time
     

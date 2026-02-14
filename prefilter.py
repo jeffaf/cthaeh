@@ -16,6 +16,7 @@ import sys
 import json
 import time
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import pefile
@@ -309,27 +310,37 @@ def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=F
 
     start = time.time()
 
-    for path in sys_files:
+    def _check_one(path):
         name = os.path.basename(path)
         should_analyze, reason, risk_hint, flags = check_driver(path, max_size, lol_hashes, lol_names)
-
-        entry = {
+        return {
             "name": name,
             "path": path,
             "size": os.path.getsize(path),
             "risk_hint": risk_hint,
             "flags": flags,
+            "_should_analyze": should_analyze,
+            "_reason": reason,
         }
 
+    # Parallelize pefile checks with threads (I/O bound + GIL released during file reads)
+    worker_count = min(8, max(1, os.cpu_count() or 2))
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        entries = list(pool.map(_check_one, sys_files))
+
+    for entry in entries:
+        should_analyze = entry.pop("_should_analyze")
+        reason = entry.pop("_reason")
+
         # Track special categories
-        if any(f.startswith("KNOWN_VULN") for f in flags):
+        if any(f.startswith("KNOWN_VULN") for f in entry["flags"]):
             results["known_vuln"].append(entry)
-        if "BYOVD_CANDIDATE" in flags:
+        if "BYOVD_CANDIDATE" in entry["flags"]:
             results["byovd_candidates"].append(entry)
 
         if should_analyze:
             # In BYOVD-only mode, only keep BYOVD candidates
-            if byovd_only and "BYOVD_CANDIDATE" not in flags:
+            if byovd_only and "BYOVD_CANDIDATE" not in entry["flags"]:
                 entry["skip_reason"] = "not a BYOVD candidate"
                 results["skip"].append(entry)
             else:
