@@ -102,7 +102,7 @@ def run_prefilter(drivers_dir, max_size_mb=5):
     try:
         from prefilter import prefilter_directory
         max_bytes = max_size_mb * 1024 * 1024
-        results = prefilter_directory(drivers_dir, max_bytes)
+        results = prefilter_directory(drivers_dir, max_bytes, check_loldrivers=True)
         return [d["path"] for d in results["analyze"]]
     except ImportError:
         print("WARNING: prefilter.py not found or pefile not installed.")
