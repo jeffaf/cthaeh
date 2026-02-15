@@ -58,39 +58,52 @@ def is_likely_microsoft(driver_path, include_microsoft=False):
 
 
 def get_loaded_drivers():
-    """Get set of currently loaded driver filenames via driverquery."""
+    """Get set of currently loaded driver filenames.
+    
+    Uses PowerShell Get-WmiObject to get actual .sys paths of running drivers.
+    Falls back to sc query if PowerShell fails.
+    """
     loaded = set()
+    
+    # Method 1: PowerShell - most reliable, gets actual file paths
     try:
+        ps_cmd = (
+            "Get-WmiObject Win32_SystemDriver | "
+            "Where-Object { $_.State -eq 'Running' } | "
+            "ForEach-Object { $_.PathName } "
+        )
         result = subprocess.run(
-            ["driverquery", "/v", "/fo", "csv"],
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
             capture_output=True, text=True, timeout=30
         )
-        lines = result.stdout.splitlines()
-        for line in lines[1:]:  # skip header
-            # CSV format varies by locale; path is usually the 2nd-to-last field
-            parts = line.strip().split('","')
-            if len(parts) >= 13:
-                path = parts[12].strip('"')
-                if path:
-                    # Handle \SystemRoot\, \??\, etc.
-                    name = os.path.basename(path).lower()
-                    if name.endswith('.sys'):
-                        loaded.add(name)
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-        print(f"WARNING: Could not enumerate loaded drivers via driverquery: {e}")
-        print("  Falling back: trying 'sc query type=driver' ...")
-        try:
-            result = subprocess.run(
-                ["sc", "query", "type=", "driver", "state=", "active"],
-                capture_output=True, text=True, timeout=30
-            )
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line.startswith("SERVICE_NAME:"):
-                    svc = line.split(":", 1)[1].strip().lower()
-                    loaded.add(svc + ".sys")
-        except Exception as e2:
-            print(f"WARNING: sc query also failed: {e2}")
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Paths come as \SystemRoot\system32\DRIVERS\foo.sys or C:\Windows\...
+            name = line.split('\\')[-1].lower()
+            if name.endswith('.sys'):
+                loaded.add(name)
+        
+        if loaded:
+            return loaded
+    except Exception as e:
+        print(f"WARNING: PowerShell driver enum failed: {e}")
+    
+    # Method 2: sc query
+    try:
+        print("  Falling back to sc query...")
+        result = subprocess.run(
+            ["sc", "query", "type=", "driver", "state=", "active"],
+            capture_output=True, text=True, timeout=30
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("SERVICE_NAME:"):
+                svc = line.split(":", 1)[1].strip().lower()
+                loaded.add(svc + ".sys")
+    except Exception as e2:
+        print(f"WARNING: sc query also failed: {e2}")
     
     return loaded
 
