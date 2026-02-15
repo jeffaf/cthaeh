@@ -206,6 +206,48 @@ def load_investigated():
 INVESTIGATED = load_investigated()
 
 
+def load_driver_cves():
+    """Load known CVE history for driver families from driver_cves.json."""
+    candidates = []
+
+    # 1. Ghidra's sourceFile
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(sourceFile.getAbsolutePath())), "driver_cves.json"))
+    except:
+        pass
+
+    # 2. Python __file__
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "driver_cves.json"))
+    except:
+        pass
+
+    # 3. Current working directory
+    candidates.append(os.path.join(os.getcwd(), "driver_cves.json"))
+
+    # 4. Environment variable override
+    env_path = os.environ.get("CTHAEH_CVES_PATH")
+    if env_path:
+        candidates.insert(0, env_path)
+
+    for cve_path in candidates:
+        try:
+            with open(cve_path, "r") as f:
+                data = json.load(f)
+                families = data.get("driver_families", {})
+                if families:
+                    print("driver_cves.json loaded from: %s (%d families)" % (cve_path, len(families)))
+                    return families
+        except:
+            continue
+
+    print("WARNING: driver_cves.json not found in any search path")
+    return {}
+
+
+DRIVER_CVE_FAMILIES = load_driver_cves()
+
+
 def get_imports(program):
     """Get all imported function names."""
     imports = set()
@@ -1405,6 +1447,52 @@ def check_port_io(program):
     return findings
 
 
+def check_cve_history(driver_name, current_year=2026):
+    """Check if driver matches a family with known prior CVEs.
+
+    Scores based on:
+    - has_prior_cves: driver family has any known CVEs (+15)
+    - has_recent_cves_2yr: family has CVEs from last 2 years (+10)
+
+    Returns (findings_list, matched_cves_list) tuple.
+    """
+    findings = []
+    matched_cves = []
+    driver_lower = driver_name.lower().replace(".sys", "")
+
+    for family_id, family_data in DRIVER_CVE_FAMILIES.items():
+        patterns = family_data.get("patterns", [])
+        for pattern in patterns:
+            if pattern in driver_lower:
+                cves = family_data.get("cves", [])
+                if not cves:
+                    break
+                matched_cves = cves
+                vendor = family_data.get("vendor", "Unknown")
+                cve_ids = [c["id"] for c in cves]
+                findings.append({
+                    "check": "has_prior_cves",
+                    "detail": "%s family (%s) has %d known CVEs: %s" % (
+                        vendor, family_id, len(cves), ", ".join(cve_ids[:5])),
+                    "score": get_weight("has_prior_cves")
+                })
+
+                recent = [c for c in cves if c.get("year", 0) >= current_year - 2]
+                if recent:
+                    recent_ids = [c["id"] for c in recent]
+                    findings.append({
+                        "check": "has_recent_cves_2yr",
+                        "detail": "%d recent CVEs (last 2yr): %s" % (len(recent), ", ".join(recent_ids)),
+                        "score": get_weight("has_recent_cves_2yr")
+                    })
+                return findings, matched_cves
+        else:
+            continue
+        break
+
+    return findings, matched_cves
+
+
 def check_compound_primitives(findings_so_far):
     """Score compound exploit primitives based on combinations.
     
@@ -1905,6 +1993,9 @@ def run():
     all_findings.extend(check_urb_construction(imports, strings))
     # v5: driver class ranking
     all_findings.extend(check_driver_class_ranking(imports, import_dlls))
+    # v5: CVE history check
+    cve_findings, matched_cves = check_cve_history(driver_name)
+    all_findings.extend(cve_findings)
     # Compound scoring (must run last - uses results from above)
     all_findings.extend(check_compound_primitives(all_findings))
     all_findings.extend(check_vuln_pattern_composite(all_findings, imports))
@@ -1954,6 +2045,9 @@ def run():
     if vendor_info:
         result["vendor_info"] = vendor_info
     
+    if matched_cves:
+        result["cve_history"] = matched_cves
+
     print("===TRIAGE_START===")
     print(json.dumps(result, indent=2))
     print("===TRIAGE_END===")

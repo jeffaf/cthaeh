@@ -1,0 +1,115 @@
+{
+  "_comment": "Known CVEs for common Windows kernel driver families. Used by driver_triage.py for prior CVE history scoring.",
+  "_updated": "2026-02-14",
+  "driver_families": {
+    "qualcomm_atheros_wifi": {
+      "vendor": "Qualcomm",
+      "patterns": ["athw", "athwn", "qcwlan", "qcamain", "qcalwifi"],
+      "cves": [
+        {"id": "CVE-2019-10618", "year": 2019, "severity": "HIGH", "type": "LPE", "detail": "Kernel write-what-where in Qcamain10x64.sys WLAN driver service"},
+        {"id": "CVE-2020-3702", "year": 2020, "severity": "MEDIUM", "type": "InfoDisclosure", "detail": "Race condition in Atheros ath9k/ath10k WiFi driver leaks cleartext frames"},
+        {"id": "CVE-2020-27068", "year": 2020, "severity": "CRITICAL", "type": "RCE", "detail": "OOB read in Qualcomm WLAN driver nl80211 handler"}
+      ]
+    },
+    "mediatek_wifi_bt": {
+      "vendor": "MediaTek",
+      "patterns": ["mtkbt", "mtkwl", "mt76", "mtkwl6e"],
+      "cves": [
+        {"id": "CVE-2024-20017", "year": 2024, "severity": "CRITICAL", "type": "RCE", "detail": "Zero-click buffer overflow in MediaTek WiFi chipset wappd service (CVSS 9.8)"},
+        {"id": "CVE-2025-20677", "year": 2025, "severity": "MEDIUM", "type": "DoS", "detail": "NULL pointer dereference in MediaTek Bluetooth driver"},
+        {"id": "CVE-2024-20018", "year": 2024, "severity": "HIGH", "type": "LPE", "detail": "OOB write in MediaTek WLAN AP driver due to incorrect bounds check"}
+      ]
+    },
+    "asus_utility": {
+      "vendor": "ASUS",
+      "patterns": ["asus", "asio", "atkacpi"],
+      "cves": [
+        {"id": "CVE-2025-3464", "year": 2025, "severity": "HIGH", "type": "LPE", "detail": "AsIO3.sys authorization bypass in IRP_MJ_CREATE handler (CVSS 8.8)"},
+        {"id": "CVE-2025-1533", "year": 2025, "severity": "HIGH", "type": "LPE", "detail": "AsIO3.sys stack-based buffer overflow vulnerability"},
+        {"id": "CVE-2022-32250", "year": 2022, "severity": "HIGH", "type": "LPE", "detail": "ASUS Armoury Crate driver allows arbitrary MSR/PhysMem access"}
+      ]
+    },
+    "samsung_usb": {
+      "vendor": "Samsung",
+      "patterns": ["ssud", "ssudbus", "ssudqcnet", "ssudmdm"],
+      "cves": [
+        {"id": "CVE-2022-22292", "year": 2022, "severity": "HIGH", "type": "LPE", "detail": "Samsung device drivers allow unauthorized access to phone functions"},
+        {"id": "CVE-2021-25337", "year": 2021, "severity": "MEDIUM", "type": "InfoDisclosure", "detail": "Samsung driver clipboard data access vulnerability"}
+      ]
+    },
+    "realtek_wifi": {
+      "vendor": "Realtek",
+      "patterns": ["rtwlan", "rtl8", "rtkiow", "rtkvhd"],
+      "cves": [
+        {"id": "CVE-2024-33225", "year": 2024, "severity": "HIGH", "type": "LPE", "detail": "RTKVHD64.sys Realtek HD Audio driver IOCTL arbitrary code execution"},
+        {"id": "CVE-2022-21742", "year": 2022, "severity": "MEDIUM", "type": "DoS", "detail": "Realtek USB WiFi driver allows unprivileged user to cause BSOD"},
+        {"id": "CVE-2020-25285", "year": 2020, "severity": "MEDIUM", "type": "DoS", "detail": "Realtek WiFi driver race condition leading to crash"}
+      ]
+    },
+    "nvidia_gpu": {
+      "vendor": "NVIDIA",
+      "patterns": ["nvlddmkm", "nvpcf", "nvaudio", "nvhda", "nvstor"],
+      "cves": [
+        {"id": "CVE-2024-0126", "year": 2024, "severity": "HIGH", "type": "LPE", "detail": "NVIDIA GPU Display Driver privilege escalation vulnerability"},
+        {"id": "CVE-2024-0117", "year": 2024, "severity": "HIGH", "type": "LPE", "detail": "nvlddmkm.sys DxgkDdiEscape OOB read leading to code execution"},
+        {"id": "CVE-2023-31022", "year": 2023, "severity": "MEDIUM", "type": "DoS", "detail": "NVIDIA GPU kernel mode layer NULL-pointer dereference"},
+        {"id": "CVE-2017-6269", "year": 2017, "severity": "HIGH", "type": "LPE", "detail": "nvlddmkm.sys DxgkDdiEscape unvalidated pointer use (CVSS 8.8)"},
+        {"id": "CVE-2017-6268", "year": 2017, "severity": "HIGH", "type": "LPE", "detail": "nvlddmkm.sys unvalidated array index in DxgkDdiEscape (CVSS 8.8)"}
+      ]
+    },
+    "intel_wifi_bt": {
+      "vendor": "Intel",
+      "patterns": ["ibtusb", "netwtw", "netwlan", "iwl", "iwifi"],
+      "cves": [
+        {"id": "CVE-2022-21140", "year": 2022, "severity": "MEDIUM", "type": "InfoDisclosure", "detail": "Incomplete cleanup in Intel PROSet/Wireless WiFi drivers before v22.0"},
+        {"id": "CVE-2020-12321", "year": 2020, "severity": "HIGH", "type": "RCE", "detail": "Intel Wireless Bluetooth driver improper buffer restrictions allowing escalation"},
+        {"id": "CVE-2019-14620", "year": 2019, "severity": "MEDIUM", "type": "DoS", "detail": "Intel Wireless Bluetooth incorrect input validation allows DoS via adjacent access"},
+        {"id": "CVE-2022-36351", "year": 2022, "severity": "MEDIUM", "type": "DoS", "detail": "Intel PROSet/Wireless WiFi improper input validation leading to DoS"}
+      ]
+    },
+    "broadcom_wifi": {
+      "vendor": "Broadcom",
+      "patterns": ["bcmwl", "bcm43", "b57nd60a", "brcmfmac"],
+      "cves": [
+        {"id": "CVE-2019-9500", "year": 2019, "severity": "HIGH", "type": "RCE", "detail": "Broadcom brcmfmac WiFi driver heap buffer overflow via Wake-on-WLAN"},
+        {"id": "CVE-2019-9503", "year": 2019, "severity": "HIGH", "type": "RCE", "detail": "Broadcom brcmfmac firmware event frame validation bypass"},
+        {"id": "CVE-2019-15126", "year": 2019, "severity": "MEDIUM", "type": "InfoDisclosure", "detail": "Kr00k: Broadcom/Cypress WiFi chips send data encrypted with zeroed key"}
+      ]
+    },
+    "synaptics_touchpad": {
+      "vendor": "Synaptics",
+      "patterns": ["syntp", "synaptics"],
+      "cves": [
+        {"id": "CVE-2018-15532", "year": 2018, "severity": "LOW", "type": "InfoDisclosure", "detail": "SynTP.sys leaks multiple kernel addresses to unprivileged user mode processes"},
+        {"id": "CVE-2017-8871", "year": 2017, "severity": "MEDIUM", "type": "InfoDisclosure", "detail": "Synaptics TouchPad driver keystroke logging capability exposed"}
+      ]
+    },
+    "virtualbox": {
+      "vendor": "Oracle",
+      "patterns": ["vbox", "virtualbox"],
+      "cves": [
+        {"id": "CVE-2024-21111", "year": 2024, "severity": "HIGH", "type": "LPE", "detail": "Oracle VM VirtualBox Windows host privilege escalation via VBoxDrv"},
+        {"id": "CVE-2024-21115", "year": 2024, "severity": "HIGH", "type": "RCE", "detail": "VirtualBox Core vulnerability allowing takeover via guest-to-host escape"},
+        {"id": "CVE-2023-22098", "year": 2023, "severity": "HIGH", "type": "RCE", "detail": "VirtualBox Core vulnerability exploited at Pwn2Own 2023"},
+        {"id": "CVE-2008-3431", "year": 2008, "severity": "HIGH", "type": "LPE", "detail": "VBoxDrv.sys input validation flaw allows kernel code execution (used by Turla APT)"}
+      ]
+    },
+    "vmware": {
+      "vendor": "VMware/Broadcom",
+      "patterns": ["vmci", "vmhgfs", "vmware", "vmtools"],
+      "cves": [
+        {"id": "CVE-2025-22225", "year": 2025, "severity": "CRITICAL", "type": "RCE", "detail": "VMware ESXi arbitrary write via HGFS - exploited in ransomware campaigns"},
+        {"id": "CVE-2024-22252", "year": 2024, "severity": "CRITICAL", "type": "RCE", "detail": "VMware Workstation/Fusion use-after-free in XHCI USB controller"},
+        {"id": "CVE-2023-34044", "year": 2023, "severity": "HIGH", "type": "InfoDisclosure", "detail": "VMware Workstation/Fusion OOB read in SCSI sharing functionality"}
+      ]
+    },
+    "npcap_winpcap": {
+      "vendor": "Nmap/WinPcap",
+      "patterns": ["npcap", "npf", "winpcap"],
+      "cves": [
+        {"id": "CVE-2025-43715", "year": 2025, "severity": "HIGH", "type": "LPE", "detail": "Npcap installer NSIS race condition allows SYSTEM privilege escalation"},
+        {"id": "CVE-2007-5756", "year": 2007, "severity": "HIGH", "type": "LPE", "detail": "WinPcap NPF.SYS BIOCGSTATS IOCTL handler memory overwrite and code execution"}
+      ]
+    }
+  }
+}
