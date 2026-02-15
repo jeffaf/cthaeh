@@ -738,7 +738,51 @@ def check_internal_validation(imports):
 
 # --- Vendor / driver class context checks ---
 
-# CNA vendors with bounty programs (high-value targets)
+def load_cna_vendors():
+    """Load CNA vendor data from cna_vendors.json."""
+    candidates = []
+    
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(sourceFile.getAbsolutePath())), "cna_vendors.json"))
+    except:
+        pass
+    
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "cna_vendors.json"))
+    except:
+        pass
+    
+    try:
+        from ghidra.app.script import GhidraScriptUtil
+        for d in GhidraScriptUtil.getScriptDirectories():
+            candidates.append(os.path.join(d.getAbsolutePath(), "cna_vendors.json"))
+    except:
+        pass
+    
+    candidates.append(os.path.join(os.getcwd(), "cna_vendors.json"))
+    
+    env_path = os.environ.get("CTHAEH_CNA_PATH")
+    if env_path:
+        candidates.insert(0, env_path)
+    
+    for cna_path in candidates:
+        try:
+            with open(cna_path, "r") as f:
+                data = json.load(f)
+                vendors = data.get("vendors", {})
+                if vendors:
+                    print("cna_vendors.json loaded from: %s (%d vendors)" % (cna_path, len(vendors)))
+                    return vendors
+        except:
+            continue
+    
+    print("WARNING: cna_vendors.json not found, using built-in CNA data")
+    return None
+
+
+CNA_VENDORS_DATA = load_cna_vendors()
+
+# Fallback built-in data (used if cna_vendors.json not found)
 CNA_BOUNTY_VENDORS = {
     "qualcomm": {"cna": True, "bounty": True},
     "broadcom": {"cna": True, "bounty": True},
@@ -815,55 +859,114 @@ DRIVER_VENDOR_MAP = {
 }
 
 
+def _match_vendor_from_json(driver_lower, company_lower, all_text_lower):
+    """Match vendor using cna_vendors.json data. Returns (vendor_key, vendor_data) or None."""
+    if not CNA_VENDORS_DATA:
+        return None
+    
+    # 1. Driver name prefix match (most reliable)
+    for vendor_key, vdata in CNA_VENDORS_DATA.items():
+        for pattern in vdata.get("driver_patterns", []):
+            if driver_lower.startswith(pattern):
+                return (vendor_key, vdata)
+    
+    # 2. CompanyName match
+    if company_lower:
+        for vendor_key, vdata in CNA_VENDORS_DATA.items():
+            for name in vdata.get("names", []):
+                if name.lower() in company_lower or company_lower in name.lower():
+                    return (vendor_key, vdata)
+    
+    # 3. Fallback: all strings
+    if all_text_lower:
+        for vendor_key, vdata in CNA_VENDORS_DATA.items():
+            for name in vdata.get("names", []):
+                if name.lower() in all_text_lower:
+                    return (vendor_key, vdata)
+    
+    return None
+
+
 def check_vendor_context(strings, driver_name):
     """Score based on vendor CNA status and bounty availability.
     
     Priority: driver name prefix > CompanyName string > all strings.
     Prevents false vendor attribution (e.g., nvpcf.sys matched 'amd').
+    Uses cna_vendors.json if available, falls back to built-in data.
     """
     findings = []
     driver_lower = driver_name.lower().replace(".sys", "")
+    company = extract_company_name(strings)
+    company_lower = company.lower() if company else ""
+    all_text_lower = " ".join(strings).lower()
     
-    # 1. Try driver name prefix match first (most reliable)
     matched_vendor = None
-    for prefix in sorted(DRIVER_VENDOR_MAP.keys(), key=len, reverse=True):
-        if driver_lower.startswith(prefix):
-            vendor_key = DRIVER_VENDOR_MAP[prefix]
-            if vendor_key in CNA_BOUNTY_VENDORS:
-                matched_vendor = (vendor_key, CNA_BOUNTY_VENDORS[vendor_key])
-            break
+    bounty_url = None
     
-    # 2. Try CompanyName from version info
+    # Try JSON-based matching first
+    json_match = _match_vendor_from_json(driver_lower, company_lower, all_text_lower)
+    if json_match:
+        vendor_key, vdata = json_match
+        is_cna = vdata.get("is_cna", False)
+        bounty_url = vdata.get("bounty_url")
+        has_bounty = bounty_url is not None and bounty_url != ""
+        matched_vendor = (vendor_key, {"cna": is_cna, "bounty": has_bounty})
+    
+    # Fallback to built-in data
     if not matched_vendor:
-        company = extract_company_name(strings)
-        if company:
-            company_lower = company.lower()
+        # 1. Driver name prefix
+        for prefix in sorted(DRIVER_VENDOR_MAP.keys(), key=len, reverse=True):
+            if driver_lower.startswith(prefix):
+                vendor_key = DRIVER_VENDOR_MAP[prefix]
+                if vendor_key in CNA_BOUNTY_VENDORS:
+                    matched_vendor = (vendor_key, CNA_BOUNTY_VENDORS[vendor_key])
+                break
+        
+        # 2. CompanyName
+        if not matched_vendor and company_lower:
             for vendor in sorted(CNA_BOUNTY_VENDORS.keys()):
                 if vendor in company_lower:
                     matched_vendor = (vendor, CNA_BOUNTY_VENDORS[vendor])
                     break
-    
-    # 3. Fallback: scan all strings (least reliable, kept for coverage)
-    if not matched_vendor:
-        all_text = " ".join(strings).lower()
-        for vendor in sorted(CNA_BOUNTY_VENDORS.keys()):
-            if vendor in all_text:
-                matched_vendor = (vendor, CNA_BOUNTY_VENDORS[vendor])
-                break
+        
+        # 3. All strings
+        if not matched_vendor:
+            for vendor in sorted(CNA_BOUNTY_VENDORS.keys()):
+                if vendor in all_text_lower:
+                    matched_vendor = (vendor, CNA_BOUNTY_VENDORS[vendor])
+                    break
     
     if matched_vendor:
         vendor_name, info = matched_vendor
         if info["cna"] and info["bounty"]:
+            detail = "Vendor %s is CNA with bounty program" % vendor_name.title()
+            if bounty_url:
+                detail += " (%s)" % bounty_url
             findings.append({
                 "check": "vendor_cna_bounty",
-                "detail": "Vendor %s is CNA with bounty program (high-value disclosure target)" % vendor_name.title(),
-                "score": get_weight("vendor_cna_bounty")
+                "detail": detail,
+                "score": get_weight("vendor_cna_bounty"),
+                "vendor_cna": True,
+                "vendor_name": vendor_name.title(),
+                "bounty_url": bounty_url,
             })
         elif info["cna"]:
             findings.append({
                 "check": "vendor_cna",
                 "detail": "Vendor %s is CNA (easier CVE assignment path)" % vendor_name.title(),
-                "score": get_weight("vendor_cna")
+                "score": get_weight("vendor_cna"),
+                "vendor_cna": True,
+                "vendor_name": vendor_name.title(),
+                "bounty_url": None,
+            })
+        else:
+            findings.append({
+                "check": "vendor_not_cna",
+                "detail": "Vendor %s is not a CNA (CVE assignment through other channels)" % vendor_name.title(),
+                "score": 0,
+                "vendor_cna": False,
+                "vendor_name": vendor_name.title(),
+                "bounty_url": bounty_url if info.get("bounty") else None,
             })
     
     return findings
@@ -1707,6 +1810,17 @@ def run():
     else:
         priority = "SKIP"
     
+    # Extract vendor CNA info from findings for top-level access
+    vendor_info = {}
+    for f in all_findings:
+        if f.get("vendor_name"):
+            vendor_info = {
+                "vendor_name": f["vendor_name"],
+                "is_cna": f.get("vendor_cna", False),
+                "bounty_url": f.get("bounty_url"),
+            }
+            break
+    
     result = {
         "driver": driver_info,
         "score": total_score,
@@ -1716,6 +1830,9 @@ def run():
         "import_count": len(imports),
         "string_count": len(strings),
     }
+    
+    if vendor_info:
+        result["vendor_info"] = vendor_info
     
     print("===TRIAGE_START===")
     print(json.dumps(result, indent=2))

@@ -293,6 +293,11 @@ def write_report(results, output_path, top_n=20):
         
         if version_summary:
             lines.append(f"**Vendor/Product:** {version_summary}")
+        vi = r.get("vendor_info", {})
+        if vi:
+            cna_str = "✅ CNA" if vi.get("is_cna") else "❌ Not CNA"
+            bounty_str = f" | 💰 Bounty: [{vi['bounty_url']}]({vi['bounty_url']})" if vi.get("bounty_url") else ""
+            lines.append(f"**CNA Status:** {cna_str} ({vi.get('vendor_name', '?')}){bounty_str}")
         lines.append(f"**Size:** {driver.get('size', 0):,} bytes | **Functions:** {driver.get('function_count', 0)}")
         lines.append("")
         
@@ -341,6 +346,11 @@ def explain_driver(results, driver_name):
     print(f"  Size: {d.get('size', 0):,} bytes | Functions: {d.get('function_count', 0)}")
     if d.get("version_summary"):
         print(f"  Vendor: {d['version_summary']}")
+    vi = match.get("vendor_info", {})
+    if vi:
+        cna_str = "✅ CNA" if vi.get("is_cna") else "❌ Not CNA"
+        bounty_str = f" | 💰 Bounty: {vi['bounty_url']}" if vi.get("bounty_url") else ""
+        print(f"  CNA Status: {cna_str} ({vi.get('vendor_name', '?')}){bounty_str}")
     print()
     
     findings = match.get("findings", [])

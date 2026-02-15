@@ -1,0 +1,125 @@
+{
+  "description": "CNA (CVE Numbering Authority) status and bounty programs for Windows kernel driver vendors",
+  "vendors": {
+    "qualcomm": {
+      "names": ["Qualcomm", "Qualcomm Incorporated", "Qualcomm Technologies", "Qualcomm Atheros"],
+      "is_cna": true,
+      "bounty_url": "https://www.qualcomm.com/company/product-security/reporting-security-concerns",
+      "driver_patterns": ["qc", "qcwlan", "qcalwifi", "athw", "atheros", "ath6", "ath1"]
+    },
+    "samsung": {
+      "names": ["Samsung", "Samsung Electronics", "SAMSUNG ELECTRONICS CO., LTD."],
+      "is_cna": true,
+      "bounty_url": "https://security.samsungmobile.com/",
+      "driver_patterns": ["ssud", "samsung"]
+    },
+    "asus": {
+      "names": ["ASUSTeK", "ASUS", "ASUSTeK Computer Inc.", "ASUSTeK COMPUTER INC."],
+      "is_cna": true,
+      "bounty_url": null,
+      "driver_patterns": ["asus", "asussaio", "asio"]
+    },
+    "mediatek": {
+      "names": ["MediaTek", "MediaTek Inc.", "MediaTek Inc"],
+      "is_cna": true,
+      "bounty_url": "https://www.mediatek.com/security/report-vulnerabilities",
+      "driver_patterns": ["mtk", "mtkwl", "mtkbt", "mt76"]
+    },
+    "intel": {
+      "names": ["Intel", "Intel Corporation", "Intel Corp."],
+      "is_cna": true,
+      "bounty_url": "https://www.intel.com/content/www/us/en/security-center/bug-bounty-program.html",
+      "driver_patterns": ["igdkmd", "iaxnvme", "iastor", "iaxhci", "iwl", "iwifi", "igfx"]
+    },
+    "amd": {
+      "names": ["AMD", "Advanced Micro Devices", "Advanced Micro Devices, Inc."],
+      "is_cna": true,
+      "bounty_url": null,
+      "driver_patterns": ["amd", "atikmdag", "atikmpag"]
+    },
+    "nvidia": {
+      "names": ["NVIDIA", "NVIDIA Corporation"],
+      "is_cna": true,
+      "bounty_url": "https://www.nvidia.com/en-us/security/submit-vulnerability/",
+      "driver_patterns": ["nvpcf", "nvraid", "nvlddmkm", "nvstor", "nvaudio", "nvhda"]
+    },
+    "realtek": {
+      "names": ["Realtek", "Realtek Semiconductor", "Realtek Semiconductor Corp."],
+      "is_cna": false,
+      "bounty_url": null,
+      "driver_patterns": ["rtl", "rtlwlan", "rtwlan", "rtl8", "rtkvhd", "rtkaudibus", "rtkiow"]
+    },
+    "broadcom": {
+      "names": ["Broadcom", "Broadcom Inc.", "Broadcom Corporation"],
+      "is_cna": true,
+      "bounty_url": "https://www.broadcom.com/support/security-center",
+      "driver_patterns": ["bcmwl", "bcm43", "brcmfmac", "brcmsmac"]
+    },
+    "ralink": {
+      "names": ["Ralink", "Ralink Technology", "Ralink Technology, Corp."],
+      "is_cna": false,
+      "bounty_url": null,
+      "driver_patterns": ["ralink", "rt28", "rt61", "rt73", "netr28"]
+    },
+    "marvell": {
+      "names": ["Marvell", "Marvell Semiconductor", "Marvell Technology Group"],
+      "is_cna": false,
+      "bounty_url": null,
+      "driver_patterns": ["mrvl", "marvell", "mvneta"]
+    },
+    "synaptics": {
+      "names": ["Synaptics", "Synaptics Incorporated"],
+      "is_cna": false,
+      "bounty_url": null,
+      "driver_patterns": ["synapt", "syntp", "synaudio"]
+    },
+    "dell": {
+      "names": ["Dell", "Dell Inc.", "Dell Technologies"],
+      "is_cna": true,
+      "bounty_url": null,
+      "driver_patterns": ["dell", "dbutil"]
+    },
+    "hp": {
+      "names": ["HP", "HP Inc.", "Hewlett-Packard", "Hewlett Packard"],
+      "is_cna": true,
+      "bounty_url": null,
+      "driver_patterns": ["hp", "hpqkb"]
+    },
+    "lenovo": {
+      "names": ["Lenovo", "Lenovo Group", "Lenovo (Beijing)"],
+      "is_cna": true,
+      "bounty_url": null,
+      "driver_patterns": ["len", "lnvhswfx"]
+    },
+    "logitech": {
+      "names": ["Logitech", "Logitech Inc.", "Logicool"],
+      "is_cna": false,
+      "bounty_url": "https://hackerone.com/logitech",
+      "driver_patterns": ["logi", "lhid"]
+    },
+    "microsoft": {
+      "names": ["Microsoft", "Microsoft Corporation"],
+      "is_cna": true,
+      "bounty_url": "https://www.microsoft.com/en-us/msrc/bounty",
+      "driver_patterns": ["ntfs", "ndis", "tcpip", "http", "fltmgr", "storport", "wdf01000"]
+    },
+    "oracle": {
+      "names": ["Oracle", "Oracle Corporation", "Oracle VM VirtualBox"],
+      "is_cna": true,
+      "bounty_url": null,
+      "driver_patterns": ["vbox", "virtualbox"]
+    },
+    "vmware": {
+      "names": ["VMware", "VMware, Inc."],
+      "is_cna": true,
+      "bounty_url": null,
+      "driver_patterns": ["vmware", "vmci", "vsock", "vmx"]
+    },
+    "npcap": {
+      "names": ["Nmap", "Npcap", "Insecure.Com LLC", "Nmap Project"],
+      "is_cna": false,
+      "bounty_url": null,
+      "driver_patterns": ["npcap", "npf"]
+    }
+  }
+}
