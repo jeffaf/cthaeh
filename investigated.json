@@ -3,7 +3,9 @@
     "nvpcf.sys": "FP - MSR read not user-reachable, WDF device interface blocks unprivileged access",
     "AMDRyzenMasterDriver.sys": "Skipped - cannot obtain latest version for analysis",
     "AsusSAIO.sys": "1 vuln accepted by ASUS PSIRT, 3 rejected (Feb 2026)",
+    "AsusWmiAcpi.sys": "1 vuln accepted by ASUS PSIRT, 3 rejected (Feb 2026)",
     "ssudbus2.sys": "4 vulns submitted to Samsung PSIRT (Feb 2026)",
+    "mtkbtfilterx.sys": "Submitted to MediaTek PSIRT MSV-7296 (Feb 2026), under review",
     "amdfendr.sys": "FP - AMD Fenced Runner, legitimate hardware management driver"
   }
 }
