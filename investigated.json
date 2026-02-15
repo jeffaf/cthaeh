@@ -7,6 +7,7 @@
     "ssudbus2.sys": "4 vulns submitted to Samsung PSIRT (Feb 2026)",
     "mtkbtfilterx.sys": "Submitted to MediaTek PSIRT MSV-7296 (Feb 2026), under review",
     "mtkwl6ex.sys": "Submitted to MediaTek PSIRT MSV-6338 (Jan 2026), acknowledged",
+    "amd_dpfc.sys": "Investigated - nothing exploitable found (Feb 2026)",
     "amdfendr.sys": "FP - AMD Fenced Runner, legitimate hardware management driver"
   }
 }
