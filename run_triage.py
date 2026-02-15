@@ -308,8 +308,31 @@ def write_report(results, output_path, top_n=20):
         if dc and dc.get("class", "UNKNOWN") != "UNKNOWN":
             lines.append(f"**Driver Class:** {dc['class']} ({dc.get('category', '')})")
         lines.append(f"**Size:** {driver.get('size', 0):,} bytes | **Functions:** {driver.get('function_count', 0)}")
+        # Hardware presence info (Issue #3)
+        hw = r.get("hardware_check", {})
+        if hw:
+            hw_status = hw.get("status", "")
+            if hw_status == "HARDWARE_PRESENT":
+                matched = hw.get("matched_device", "unknown device")
+                lines.append(f"**Hardware:** Present ({matched})")
+            elif hw_status == "HARDWARE_ABSENT":
+                lines.append(f"**Hardware:** Absent (no matching PnP device)")
+            elif hw_status == "UNKNOWN":
+                lines.append(f"**Hardware:** Unknown ({hw.get('reason', '')})")
+        # Device access info (Issue #4)
+        dc_check = r.get("device_check", {})
+        if dc_check:
+            access = dc_check.get("access_level", "")
+            ACCESS_ICONS = {
+                "everyone": "!! EVERYONE",
+                "users": "! Users",
+                "admin_only": "Admin only",
+                "no_device": "No device",
+            }
+            access_str = ACCESS_ICONS.get(access, access)
+            lines.append(f"**Device Access:** {access_str} ({dc_check.get('detail', '')})")
         lines.append("")
-        
+
         # Group findings by score (high to low), skip zero-score
         findings = sorted(r.get("findings", []), key=lambda x: x["score"], reverse=True)
         scored_findings = [f for f in findings if f["score"] != 0]
@@ -363,6 +386,16 @@ def explain_driver(results, driver_name):
     dc = match.get("driver_class", {})
     if dc and dc.get("class", "UNKNOWN") != "UNKNOWN":
         print(f"  Driver Class: {dc['class']} ({dc.get('category', '')})")
+    hw = match.get("hardware_check", {})
+    if hw:
+        hw_status = hw.get("status", "")
+        if hw_status == "HARDWARE_PRESENT":
+            print(f"  Hardware: PRESENT ({hw.get('matched_device', '?')})")
+        elif hw_status == "HARDWARE_ABSENT":
+            print(f"  Hardware: ABSENT (no matching PnP device)")
+    dc_check = match.get("device_check", {})
+    if dc_check:
+        print(f"  Device Access: {dc_check.get('access_level', '?')} ({dc_check.get('detail', '')})")
     print()
     
     findings = match.get("findings", [])
@@ -472,7 +505,15 @@ def main():
     parser.add_argument("--report-top", type=int, default=20,
                         help="Number of top drivers to include in report (default: 20)")
     parser.add_argument("--explain", help="Show detailed scoring breakdown for a specific driver (by name)")
-    
+    parser.add_argument("--hw-check", action="store_true",
+                        help="Check hardware presence after triage (Windows only)")
+    parser.add_argument("--device-check", action="store_true",
+                        help="Check device object DACLs after triage (Windows only)")
+    parser.add_argument("--device-check-min-score", type=int, default=75,
+                        help="Min score for device check (default: 75)")
+    parser.add_argument("--research", action="store_true",
+                        help="Research mode: hardware_absent is informational only")
+
     args = parser.parse_args()
     
     # Merge positional and flag versions of drivers_dir
@@ -571,10 +612,43 @@ def main():
         write_csv(results, args.output)
         if json_output:
             write_json(results, json_output)
+
+        # Post-triage augmentation: hardware presence check (Issue #3)
+        if args.hw_check and json_output:
+            try:
+                from hw_check import augment_triage_results as hw_augment
+                print(f"\n{'='*60}")
+                print("  Running hardware presence check...")
+                print(f"{'='*60}")
+                results = hw_augment(json_output, research_mode=args.research)
+            except ImportError:
+                print("WARNING: hw_check.py not found. Skipping hardware presence check.")
+            except Exception as e:
+                print(f"WARNING: Hardware check failed: {e}")
+
+        # Post-triage augmentation: device security check (Issue #4)
+        if args.device_check and json_output:
+            try:
+                from device_check import augment_triage_results as dev_augment
+                print(f"\n{'='*60}")
+                print("  Running device security check...")
+                print(f"{'='*60}")
+                results = dev_augment(json_output, min_score=args.device_check_min_score)
+            except ImportError:
+                print("WARNING: device_check.py not found. Skipping device check.")
+            except Exception as e:
+                print(f"WARNING: Device check failed: {e}")
+
+        # Re-write CSV and report after augmentation
+        if args.hw_check or args.device_check:
+            write_csv(results, args.output)
+            if json_output:
+                write_json(results, json_output)
+
         if report_output:
             write_report(results, report_output, args.report_top)
         print_summary(results)
-    
+
     if results:
         if args.explain:
             explain_driver(results, args.explain)
