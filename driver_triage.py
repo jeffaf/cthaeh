@@ -117,11 +117,18 @@ WEIGHTS = {
     # v4.2: vuln pattern composite (from real findings)
     "vuln_pattern_composite": 25,
 
+    # v5: driver class ranking
+    "dangerous_driver_class": 10,
+
     # HVCI
     "likely_hvci_incompatible": 5,
 
     # WHQL-signed / inbox penalty (stronger negative scoring)
     "whql_signed_inbox": -20,
+
+    # v5: CVE history
+    "has_prior_cves": 15,
+    "has_recent_cves_2yr": 10,
 
     # v4.3: research-driven additions
     "wdf_device_interface": -15,   # WDF + device interface = SDDL-protected (nvpcf FP lesson)
@@ -206,6 +213,17 @@ def get_imports(program):
     for sym in sym_table.getExternalSymbols():
         imports.add(sym.getName().lower())
     return imports
+
+
+def get_import_dlls(program):
+    """Get imported DLL names (lowercase)."""
+    dlls = set()
+    sym_table = program.getSymbolTable()
+    for sym in sym_table.getExternalSymbols():
+        parent = sym.getParentNamespace()
+        if parent is not None:
+            dlls.add(parent.getName().lower())
+    return dlls
 
 
 def get_strings(program):
@@ -1623,6 +1641,97 @@ def check_urb_construction(imports, strings):
     return findings
 
 
+def check_driver_class_ranking(imports, import_dlls=None):
+    """Classify driver by type based on Ghidra symbol table imports.
+
+    Returns findings with driver_class info and scoring for dangerous classes.
+    CRITICAL/HIGH class drivers get +10 (dangerous_driver_class).
+    """
+    findings = []
+    if import_dlls is None:
+        import_dlls = set()
+
+    has_iocreatedevice = "iocreatedevice" in imports
+    has_wdfdrivercreate = "wdfdrivercreate" in imports
+    has_fltregisterfilter = "fltregisterfilter" in imports
+
+    cls = "UNKNOWN"
+    category = "Unclassified"
+
+    # CRITICAL: FS filter or raw WDM
+    if has_fltregisterfilter:
+        cls = "CRITICAL"
+        category = "File system filter"
+    elif has_iocreatedevice and not has_wdfdrivercreate:
+        cls = "CRITICAL"
+        category = "Raw WDM driver"
+
+    # HIGH: NDIS, Bluetooth, USB function
+    if cls == "UNKNOWN":
+        ndis = {"ndisregisterprotocoldriver", "ndismregisterminiportdriver"}
+        if imports & ndis:
+            cls = "HIGH"
+            category = "NDIS network driver"
+
+    if cls == "UNKNOWN":
+        bt_dlls = {"bthport.sys", "bthhfp.sys"}
+        if import_dlls & bt_dlls:
+            cls = "HIGH"
+            category = "Bluetooth driver"
+
+    if cls == "UNKNOWN":
+        usb = {"usbd_createconfigurationrequestex",
+               "wdfusbtargetdevicesendcontroltransfersynchronously"}
+        if imports & usb:
+            cls = "HIGH"
+            category = "USB function driver"
+
+    # MEDIUM: WDF/KMDF, display
+    if cls == "UNKNOWN":
+        if has_wdfdrivercreate:
+            cls = "MEDIUM"
+            category = "WDF/KMDF driver"
+
+    if cls == "UNKNOWN":
+        if "dxgkinitialize" in imports:
+            cls = "MEDIUM"
+            category = "Display/GPU driver"
+
+    # LOW: audio, HID, printer
+    if cls == "UNKNOWN":
+        audio = {"portclscreate", "pcregistersubdevice"}
+        if imports & audio:
+            cls = "LOW"
+            category = "Audio (PortCls) driver"
+
+    if cls == "UNKNOWN":
+        if "hidregisterminidriver" in imports:
+            cls = "LOW"
+            category = "HID minidriver"
+
+    if cls != "UNKNOWN":
+        score = 0
+        if cls in ("CRITICAL", "HIGH"):
+            score = get_weight("dangerous_driver_class")
+        findings.append({
+            "check": "dangerous_driver_class" if score > 0 else "driver_class_info",
+            "detail": "Driver class: %s (%s)" % (cls, category),
+            "score": score,
+            "driver_class": cls,
+            "driver_category": category,
+        })
+    else:
+        findings.append({
+            "check": "driver_class_info",
+            "detail": "Driver class: UNKNOWN (unclassified)",
+            "score": 0,
+            "driver_class": "UNKNOWN",
+            "driver_category": "Unclassified",
+        })
+
+    return findings
+
+
 def check_whql_inbox(strings, driver_name):
     """Detect WHQL-signed or Windows inbox drivers for stronger deprioritization.
     
@@ -1721,6 +1830,7 @@ def run():
         return
     
     imports = get_imports(program)
+    import_dlls = get_import_dlls(program)
     strings = get_strings(program)
     driver_info = get_driver_info(program)
     driver_name = driver_info.get("name", "")
@@ -1793,6 +1903,8 @@ def run():
     all_findings.extend(check_uefi_access(imports))
     all_findings.extend(check_hardcoded_crypto(strings))
     all_findings.extend(check_urb_construction(imports, strings))
+    # v5: driver class ranking
+    all_findings.extend(check_driver_class_ranking(imports, import_dlls))
     # Compound scoring (must run last - uses results from above)
     all_findings.extend(check_compound_primitives(all_findings))
     all_findings.extend(check_vuln_pattern_composite(all_findings, imports))
@@ -1821,10 +1933,18 @@ def run():
             }
             break
     
+    # Extract driver class from findings
+    driver_class_info = {"class": "UNKNOWN", "category": "Unclassified"}
+    for f in all_findings:
+        if "driver_class" in f:
+            driver_class_info = {"class": f["driver_class"], "category": f.get("driver_category", "")}
+            break
+
     result = {
         "driver": driver_info,
         "score": total_score,
         "priority": priority,
+        "driver_class": driver_class_info,
         "findings_count": len(all_findings),
         "findings": all_findings,
         "import_count": len(imports),

@@ -126,7 +126,7 @@ def write_csv(results, output_path):
     with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "Priority", "Score", "Driver", "Path", "Size",
+            "Priority", "Score", "Driver", "Class", "Path", "Size",
             "Functions", "Findings", "Top Checks"
         ])
         
@@ -137,10 +137,14 @@ def write_csv(results, output_path):
                 f["check"] for f in sorted(findings, key=lambda x: x["score"], reverse=True)[:5]
             )
             
+            dc = r.get("driver_class", {})
+            driver_cls = dc.get("class", "?") if dc else "?"
+
             writer.writerow([
                 r.get("priority", "?"),
                 r.get("score", 0),
                 driver.get("name", "?"),
+                driver_cls,
                 driver.get("path", "?"),
                 driver.get("size", 0),
                 driver.get("function_count", 0),
@@ -175,7 +179,9 @@ def print_summary(results):
         print("Top targets:")
         for i, r in enumerate(results[:20], 1):
             driver = r.get("driver", {})
-            print(f"  {i:2d}. [{r.get('priority', '?'):6s}] {r.get('score', 0):3d} pts  {driver.get('name', '?')}")
+            dc = r.get("driver_class", {})
+            cls_tag = f" [{dc['class']}]" if dc and dc.get("class", "UNKNOWN") != "UNKNOWN" else ""
+            print(f"  {i:2d}. [{r.get('priority', '?'):6s}] {r.get('score', 0):3d} pts  {driver.get('name', '?')}{cls_tag}")
 
 
 def run_analysis(drivers, ghidra_path, script_path, project_dir, workers=1, json_output=None):
@@ -298,6 +304,9 @@ def write_report(results, output_path, top_n=20):
             cna_str = "✅ CNA" if vi.get("is_cna") else "❌ Not CNA"
             bounty_str = f" | 💰 Bounty: [{vi['bounty_url']}]({vi['bounty_url']})" if vi.get("bounty_url") else ""
             lines.append(f"**CNA Status:** {cna_str} ({vi.get('vendor_name', '?')}){bounty_str}")
+        dc = r.get("driver_class", {})
+        if dc and dc.get("class", "UNKNOWN") != "UNKNOWN":
+            lines.append(f"**Driver Class:** {dc['class']} ({dc.get('category', '')})")
         lines.append(f"**Size:** {driver.get('size', 0):,} bytes | **Functions:** {driver.get('function_count', 0)}")
         lines.append("")
         
@@ -351,6 +360,9 @@ def explain_driver(results, driver_name):
         cna_str = "✅ CNA" if vi.get("is_cna") else "❌ Not CNA"
         bounty_str = f" | 💰 Bounty: {vi['bounty_url']}" if vi.get("bounty_url") else ""
         print(f"  CNA Status: {cna_str} ({vi.get('vendor_name', '?')}){bounty_str}")
+    dc = match.get("driver_class", {})
+    if dc and dc.get("class", "UNKNOWN") != "UNKNOWN":
+        print(f"  Driver Class: {dc['class']} ({dc.get('category', '')})")
     print()
     
     findings = match.get("findings", [])

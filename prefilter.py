@@ -199,6 +199,106 @@ def get_file_hashes(filepath):
     }
 
 
+def classify_driver_class(imports, import_dlls=None):
+    """Classify driver by type based on imports and DLLs.
+
+    Returns dict with 'class' (CRITICAL/HIGH/MEDIUM/LOW/UNKNOWN),
+    'category' description, and 'exploitability' notes.
+    """
+    if import_dlls is None:
+        import_dlls = set()
+    import_names_lower = {i.lower() for i in imports}
+
+    has_iocreatedevice = "IoCreateDevice" in imports or "iocreatedevice" in import_names_lower
+    has_wdfdrivercreate = "WdfDriverCreate" in imports or "wdfdrivercreate" in import_names_lower
+    has_fltregisterfilter = "FltRegisterFilter" in imports or "fltregisterfilter" in import_names_lower
+
+    # CRITICAL: Raw WDM without WDF safety, or FS filter
+    if has_fltregisterfilter:
+        return {
+            "class": "CRITICAL",
+            "category": "File system filter",
+            "exploitability": "FS filters intercept all file I/O; bugs = system-wide impact",
+        }
+    if has_iocreatedevice and not has_wdfdrivercreate:
+        return {
+            "class": "CRITICAL",
+            "category": "Raw WDM driver",
+            "exploitability": "No WDF safety rails; manual IRP handling prone to bugs",
+        }
+
+    # HIGH: NDIS, Bluetooth, USB function drivers
+    ndis_imports = {"NdisRegisterProtocolDriver", "NdisMRegisterMiniportDriver"}
+    if imports & ndis_imports:
+        return {
+            "class": "HIGH",
+            "category": "NDIS network driver",
+            "exploitability": "Network packet parsing in kernel; remote attack surface",
+        }
+
+    bt_dlls = {"bthport.sys", "bthhfp.sys"}
+    if import_dlls & bt_dlls:
+        return {
+            "class": "HIGH",
+            "category": "Bluetooth driver",
+            "exploitability": "BT stack in kernel; proximity-based attack surface",
+        }
+
+    usb_imports = {"USBD_CreateConfigurationRequestEx", "WdfUsbTargetDeviceSendControlTransferSynchronously"}
+    if imports & usb_imports:
+        return {
+            "class": "HIGH",
+            "category": "USB function driver",
+            "exploitability": "USB request handling in kernel; physical/logical attack surface",
+        }
+
+    # MEDIUM: WDF/KMDF, display
+    if has_wdfdrivercreate:
+        return {
+            "class": "MEDIUM",
+            "category": "WDF/KMDF driver",
+            "exploitability": "WDF provides safety rails but bugs still possible",
+        }
+
+    if "DxgkInitialize" in imports or "dxgkinitialize" in import_names_lower:
+        return {
+            "class": "MEDIUM",
+            "category": "Display/GPU driver",
+            "exploitability": "Complex IOCTL surface but often well-audited",
+        }
+
+    # LOW: HID, printer, audio
+    if "PortClsCreate" in imports or "portclscreate" in import_names_lower or \
+       "PcRegisterSubdevice" in imports or "pcregistersubdevice" in import_names_lower:
+        return {
+            "class": "LOW",
+            "category": "Audio (PortCls) driver",
+            "exploitability": "Minimal direct user IOCTL surface",
+        }
+
+    hid_imports = {"HidRegisterMinidriver", "hidregisterminidriver"}
+    if imports & hid_imports or import_names_lower & hid_imports:
+        return {
+            "class": "LOW",
+            "category": "HID minidriver",
+            "exploitability": "Limited attack surface through HID stack",
+        }
+
+    printer_dlls = {"pjlmon.dll", "tcpmon.dll", "usbmon.dll"}
+    if import_dlls & printer_dlls:
+        return {
+            "class": "LOW",
+            "category": "Printer driver",
+            "exploitability": "Typically sandboxed print pipeline",
+        }
+
+    return {
+        "class": "UNKNOWN",
+        "category": "Unclassified",
+        "exploitability": "Manual review needed",
+    }
+
+
 def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_names=None):
     """
     Quick PE import check on a driver.
@@ -210,7 +310,7 @@ def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_name
 
     # Size check
     if max_size and size > max_size:
-        return False, f"too large ({size // 1024}KB)", 0, flags
+        return False, f"too large ({size // 1024}KB)", 0, flags, None, None
 
     # LOLDrivers check
     if lol_hashes:
@@ -224,25 +324,55 @@ def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_name
     try:
         pe = pefile.PE(driver_path, fast_load=True)
         pe.parse_data_directories(
-            directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]]
+            directories=[
+                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
+                pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"],
+            ]
         )
     except Exception as e:
-        return False, f"PE parse error: {e}", 0, flags
+        return False, f"PE parse error: {e}", 0, flags, None, None
 
-    # Extract import names
+    # Extract import names and DLL names
     imports = set()
+    import_dlls = set()
     if hasattr(pe, "DIRECTORY_ENTRY_IMPORT"):
         for entry in pe.DIRECTORY_ENTRY_IMPORT:
+            dll_name = entry.dll.decode("utf-8", errors="ignore").lower() if entry.dll else ""
+            import_dlls.add(dll_name)
             for imp in entry.imports:
                 if imp.name:
                     imports.add(imp.name.decode("utf-8", errors="ignore"))
 
+    # Extract signer / company name from version info
+    signer = None
+    try:
+        if hasattr(pe, "VS_VERSIONINFO"):
+            for finfo in pe.FileInfo:
+                for entry in finfo:
+                    if hasattr(entry, "StringTable"):
+                        for st in entry.StringTable:
+                            for key, val in st.entries.items():
+                                key_str = key.decode("utf-8", errors="ignore")
+                                if key_str == "CompanyName" and val:
+                                    signer = val.decode("utf-8", errors="ignore").strip()
+    except Exception:
+        pass
+
+    # Classify driver class based on imports and DLLs
+    driver_class = classify_driver_class(imports, import_dlls)
+
     pe.close()
+
+    # Add signer and driver class to flags for downstream use
+    if signer:
+        flags.append(f"SIGNER:{signer}")
+    if driver_class and driver_class["class"] != "UNKNOWN":
+        flags.append(f"CLASS:{driver_class['class']}:{driver_class['category']}")
 
     # Must have at least one interesting import
     has_interesting = bool(imports & INTERESTING_IMPORTS)
     if not has_interesting:
-        return False, "no device/IOCTL imports", 0, flags
+        return False, "no device/IOCTL imports", 0, flags, signer, driver_class
 
     # Count high-risk imports as a hint
     high_risk_count = len(imports & HIGH_RISK_IMPORTS)
@@ -286,7 +416,7 @@ def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_name
         flags.append("FIRMWARE_ACCESS")
         high_risk_count += 2
 
-    return True, "has attack surface", high_risk_count, flags
+    return True, "has attack surface", high_risk_count, flags, signer, driver_class
 
 
 def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=False, byovd_only=False):
@@ -312,8 +442,8 @@ def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=F
 
     def _check_one(path):
         name = os.path.basename(path)
-        should_analyze, reason, risk_hint, flags = check_driver(path, max_size, lol_hashes, lol_names)
-        return {
+        should_analyze, reason, risk_hint, flags, signer, driver_class = check_driver(path, max_size, lol_hashes, lol_names)
+        entry = {
             "name": name,
             "path": path,
             "size": os.path.getsize(path),
@@ -322,6 +452,11 @@ def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=F
             "_should_analyze": should_analyze,
             "_reason": reason,
         }
+        if signer:
+            entry["signer"] = signer
+        if driver_class:
+            entry["driver_class"] = driver_class
+        return entry
 
     # Parallelize pefile checks with threads (I/O bound + GIL released during file reads)
     worker_count = min(8, max(1, os.cpu_count() or 2))
@@ -396,6 +531,18 @@ def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=F
         print(f"\n  🔓 Physical memory R/W candidates: {len(phys_mem)}")
         for d in phys_mem:
             print(f"      {d['name']}")
+
+    # Show driver class breakdown
+    class_counts = {}
+    for d in results["analyze"]:
+        dc = d.get("driver_class", {})
+        cls = dc.get("class", "UNKNOWN") if dc else "UNKNOWN"
+        class_counts[cls] = class_counts.get(cls, 0) + 1
+    if class_counts:
+        print(f"\n  📊 Driver class breakdown:")
+        for cls in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]:
+            if cls in class_counts:
+                print(f"      {cls}: {class_counts[cls]}")
 
     return results
 
