@@ -65,14 +65,17 @@ def get_loaded_drivers():
             ["driverquery", "/v", "/fo", "csv"],
             capture_output=True, text=True, timeout=30
         )
-        for line in result.stdout.splitlines()[1:]:  # skip header
-            # CSV format: "Display Name","Description","Driver Type","Start Mode","State","Status","Accept Stop","Accept Pause","Paged Pool(bytes)","Code(bytes)","BSS(bytes)","Link Date","Path","Init(bytes)"
+        lines = result.stdout.splitlines()
+        for line in lines[1:]:  # skip header
+            # CSV format varies by locale; path is usually the 2nd-to-last field
             parts = line.strip().split('","')
             if len(parts) >= 13:
                 path = parts[12].strip('"')
                 if path:
+                    # Handle \SystemRoot\, \??\, etc.
                     name = os.path.basename(path).lower()
-                    loaded.add(name)
+                    if name.endswith('.sys'):
+                        loaded.add(name)
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
         print(f"WARNING: Could not enumerate loaded drivers via driverquery: {e}")
         print("  Falling back: trying 'sc query type=driver' ...")
@@ -106,6 +109,9 @@ def extract_drivers(driverstore_path, output_dir, include_microsoft=False, loade
         loaded_set = get_loaded_drivers()
         if loaded_set:
             print(f"  Loaded drivers detected: {len(loaded_set)}")
+            # Show a few examples for sanity check
+            sample = sorted(loaded_set)[:5]
+            print(f"  Sample: {', '.join(sample)}")
         else:
             print("WARNING: No loaded drivers detected, scanning all drivers.")
             loaded_set = None
@@ -122,15 +128,15 @@ def extract_drivers(driverstore_path, output_dir, include_microsoft=False, loade
                 continue
             
             full_path = os.path.join(root, f)
+            base_name = f.lower()
+            
+            # Check loaded filter FIRST (narrows the set before MS filter)
+            if loaded_set is not None and base_name not in loaded_set:
+                skipped_not_loaded += 1
+                continue
             
             if is_likely_microsoft(full_path, include_microsoft):
                 skipped_ms += 1
-                continue
-            
-            base_name = f.lower()
-            
-            if loaded_set is not None and base_name not in loaded_set:
-                skipped_not_loaded += 1
                 continue
             if base_name in seen_names:
                 skipped_dup += 1
