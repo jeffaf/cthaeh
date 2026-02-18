@@ -177,6 +177,10 @@ More at [Cred Relay](https://credrelay.com), a monthly newsletter on offensive s
 - `pefile`: `pip install pefile`
 - Windows (for DriverStore extraction; analysis works on any OS)
 
+## Acknowledgments
+
+WDAC block policy checking and LOLDrivers cross-reference inspired by [HolyGrail](https://github.com/BlackSnufkin/Holygrail) by BlackSnufkin.
+
 ## License
 
 MIT
