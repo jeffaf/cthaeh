@@ -25,6 +25,76 @@ except ImportError:
     sys.exit(1)
 
 
+# --- WDAC Block Policy ---
+POLICIES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "policies")
+
+def load_wdac_block_hashes():
+    """Load SHA256 (and SHA1) deny hashes from WDAC block policy JSONs."""
+    hashes = set()
+    for fname in ("Win10_MicrosoftDriverBlockPolicy.json", "Win11_MicrosoftDriverBlockPolicy.json"):
+        fpath = os.path.join(POLICIES_DIR, fname)
+        if not os.path.exists(fpath):
+            continue
+        try:
+            with open(fpath, "r") as f:
+                data = json.load(f)
+            for rule in data.get("file_rules", []):
+                if rule.get("action") == "deny" and "hash" in rule:
+                    hashes.add(rule["hash"].lower())
+        except Exception:
+            pass
+    return hashes
+
+
+def load_wdac_filename_rules():
+    """Load filename+version deny rules from WDAC block policy JSONs."""
+    rules = []  # list of (filename_lower, max_version_str)
+    for fname in ("Win10_MicrosoftDriverBlockPolicy.json", "Win11_MicrosoftDriverBlockPolicy.json"):
+        fpath = os.path.join(POLICIES_DIR, fname)
+        if not os.path.exists(fpath):
+            continue
+        try:
+            with open(fpath, "r") as f:
+                data = json.load(f)
+            for rule in data.get("file_rules", []):
+                if rule.get("action") == "deny" and "file_name" in rule:
+                    rules.append((
+                        rule["file_name"].lower(),
+                        rule.get("maximum_file_version", "65535.65535.65535.65535"),
+                    ))
+        except Exception:
+            pass
+    return rules
+
+
+def _parse_version(v):
+    """Parse dotted version string into tuple of ints for comparison."""
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except (ValueError, AttributeError):
+        return (0,)
+
+
+def load_holygrail_loldrivers():
+    """Load LOLDrivers SHA256 hashes from HolyGrail's lol_drivers.json."""
+    lol_path = os.path.join(POLICIES_DIR, "lol_drivers.json")
+    hashes = {}  # sha256_lower -> driver tag/name
+    if not os.path.exists(lol_path):
+        return hashes
+    try:
+        with open(lol_path, "r") as f:
+            data = json.load(f)
+        for entry in data:
+            tag = entry.get("Tags", ["unknown"])[0] if entry.get("Tags") else "unknown"
+            for sample in entry.get("KnownVulnerableSamples", []):
+                sha = sample.get("SHA256", "")
+                if sha:
+                    hashes[sha.lower()] = tag
+    except Exception:
+        pass
+    return hashes
+
+
 # Imports that indicate interesting attack surface
 INTERESTING_IMPORTS = {
     # Device creation (required for user-accessible attack surface)
@@ -47,6 +117,28 @@ HIGH_RISK_IMPORTS = {
     "ExAllocatePool",
     "ExAllocatePoolWithTag",
     "ExAllocatePool2",
+    # Physical/MDL (from HolyGrail)
+    "MmGetPhysicalAddress",
+    "MmCopyMemory",
+    "MmCopyVirtualMemory",
+    "MmAllocatePagesForMdl",
+    "IoAllocateMdl",
+    # Section/VM (from HolyGrail)
+    "ZwOpenSection",
+    "ZwReadVirtualMemory",
+    "ZwWriteVirtualMemory",
+    # Process (from HolyGrail)
+    "KeStackAttachProcess",
+}
+
+# User-mode communication bridge primitives
+# Drivers WITH comms capability are more interesting (attackable from userspace)
+COMMS_IMPORTS = {
+    "IoCreateDevice",
+    "IoCreateSymbolicLink",
+    "FltRegisterFilter",
+    "FltCreateCommunicationPort",
+    "IofCompleteRequest",
 }
 
 # BYOVD process killer pairs - if a driver imports BOTH an opener and terminator,
@@ -299,7 +391,8 @@ def classify_driver_class(imports, import_dlls=None):
     }
 
 
-def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_names=None):
+def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_names=None,
+                  wdac_hashes=None, wdac_filename_rules=None, holygrail_lol=None):
     """
     Quick PE import check on a driver.
     Returns: (should_analyze, reason, risk_hint, flags)
@@ -312,14 +405,38 @@ def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_name
     if max_size and size > max_size:
         return False, f"too large ({size // 1024}KB)", 0, flags, None, None
 
-    # LOLDrivers check
+    # Compute hashes once
+    file_hashes = get_file_hashes(driver_path)
+
+    # WDAC block policy check (skip drivers already blocked by Microsoft)
+    if wdac_hashes:
+        for h in (file_hashes["sha256"], file_hashes["sha1"]):
+            if h in wdac_hashes:
+                flags.append("WDAC_BLOCKED")
+                return False, "blocked by WDAC driver block policy", 0, flags, None, None
+
+    # WDAC filename+version rules
+    if wdac_filename_rules:
+        name_lower = name.lower()
+        for rule_name, rule_max_ver in wdac_filename_rules:
+            if name_lower == rule_name:
+                flags.append(f"WDAC_FILENAME_BLOCKED:{rule_max_ver}")
+                return False, f"blocked by WDAC filename rule ({name} <= {rule_max_ver})", 0, flags, None, None
+
+    # LOLDrivers check (loldrivers.io)
     if lol_hashes:
-        file_hashes = get_file_hashes(driver_path)
         for h in file_hashes.values():
             if h in lol_hashes:
                 lol_name = lol_names.get(h, "unknown") if lol_names else "unknown"
                 flags.append(f"KNOWN_VULN:{lol_name}")
                 break
+
+    # HolyGrail LOLDrivers cross-reference by SHA256 (flag but don't skip)
+    if holygrail_lol:
+        sha256 = file_hashes["sha256"]
+        if sha256 in holygrail_lol:
+            lol_tag = holygrail_lol[sha256]
+            flags.append(f"HOLYGRAIL_LOL:{lol_tag}")
 
     try:
         pe = pefile.PE(driver_path, fast_load=True)
@@ -377,12 +494,26 @@ def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_name
     # Count high-risk imports as a hint
     high_risk_count = len(imports & HIGH_RISK_IMPORTS)
 
+    # Communication capability detection (user-mode bridge)
+    comms_found = {i for i in imports if i in COMMS_IMPORTS}
+    if len(comms_found) >= 2:
+        flags.append(f"COMMS:{'+'.join(sorted(comms_found))}")
+        high_risk_count += 2  # More interesting - attackable from userspace
+
     # BYOVD process killer detection
     has_opener = bool(imports & BYOVD_OPENERS)
     has_terminator = bool(imports & BYOVD_TERMINATORS)
     if has_opener and has_terminator:
         flags.append("BYOVD_CANDIDATE")
         high_risk_count += 3  # Boost priority
+
+    # PPL killer potential: ZwTerminateProcess + (ZwOpenProcess | PsLookupProcessByProcessId)
+    has_zw_terminate = "ZwTerminateProcess" in imports
+    has_zw_open = "ZwOpenProcess" in imports
+    has_ps_lookup = "PsLookupProcessByProcessId" in imports
+    if has_zw_terminate and (has_zw_open or has_ps_lookup):
+        flags.append("PPL_KILLER")
+        high_risk_count += 4  # High-value scoring bonus
 
     # Physical memory R/W detection
     phys_mem_count = len(imports & PHYS_MEM_INDICATORS)
@@ -424,13 +555,24 @@ def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=F
     Pre-filter all .sys files in a directory.
     Returns list of drivers worth sending to Ghidra.
     """
-    results = {"analyze": [], "skip": [], "known_vuln": [], "byovd_candidates": []}
+    results = {"analyze": [], "skip": [], "known_vuln": [], "byovd_candidates": [], "wdac_blocked": []}
 
     # Load LOLDrivers if requested
     lol_hashes = set()
     lol_names = {}
     if check_loldrivers:
         lol_hashes, lol_names = load_loldrivers_hashes()
+
+    # Load WDAC block policy hashes and filename rules
+    wdac_hashes = load_wdac_block_hashes()
+    wdac_filename_rules = load_wdac_filename_rules()
+    if wdac_hashes:
+        print(f"  WDAC block policy: {len(wdac_hashes)} deny hashes, {len(wdac_filename_rules)} filename rules loaded")
+
+    # Load HolyGrail LOLDrivers for SHA256 cross-reference
+    holygrail_lol = load_holygrail_loldrivers()
+    if holygrail_lol:
+        print(f"  HolyGrail LOLDrivers: {len(holygrail_lol)} SHA256 hashes loaded")
 
     sys_files = []
     for root, dirs, files in os.walk(drivers_dir):
@@ -442,7 +584,11 @@ def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=F
 
     def _check_one(path):
         name = os.path.basename(path)
-        should_analyze, reason, risk_hint, flags, signer, driver_class = check_driver(path, max_size, lol_hashes, lol_names)
+        should_analyze, reason, risk_hint, flags, signer, driver_class = check_driver(
+            path, max_size, lol_hashes, lol_names,
+            wdac_hashes=wdac_hashes, wdac_filename_rules=wdac_filename_rules,
+            holygrail_lol=holygrail_lol,
+        )
         entry = {
             "name": name,
             "path": path,
@@ -469,10 +615,19 @@ def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=F
 
         # Track special categories
         is_known_vuln = any(f.startswith("KNOWN_VULN") for f in entry["flags"])
+        is_wdac_blocked = any(f.startswith("WDAC_") for f in entry["flags"])
         if is_known_vuln:
             results["known_vuln"].append(entry)
+        if is_wdac_blocked:
+            results["wdac_blocked"].append(entry)
         if "BYOVD_CANDIDATE" in entry["flags"]:
             results["byovd_candidates"].append(entry)
+
+        # Skip WDAC-blocked drivers — useless for research
+        if is_wdac_blocked:
+            entry["skip_reason"] = reason
+            results["skip"].append(entry)
+            continue
 
         # Skip known LOLDrivers — we're hunting 0-days, not rediscovering old bugs
         if is_known_vuln:
@@ -519,12 +674,35 @@ def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=F
             vuln_tag = [f for f in d["flags"] if f.startswith("KNOWN_VULN")][0]
             print(f"      {d['name']} ({vuln_tag})")
 
+    if results["wdac_blocked"]:
+        print(f"\n  🚫 WDAC blocked (skipped): {len(results['wdac_blocked'])}")
+
+    # HolyGrail LOLDrivers cross-reference
+    holygrail_flagged = [d for d in results["analyze"] if any(f.startswith("HOLYGRAIL_LOL") for f in d.get("flags", []))]
+    if holygrail_flagged:
+        print(f"\n  🔍 HolyGrail LOLDrivers match (kept for variant research): {len(holygrail_flagged)}")
+        for d in holygrail_flagged:
+            tag = [f for f in d["flags"] if f.startswith("HOLYGRAIL_LOL")][0]
+            print(f"      {d['name']} ({tag})")
+
     if results["byovd_candidates"]:
         print(f"\n  🎯 BYOVD candidates (process killer imports): {len(results['byovd_candidates'])}")
         for d in results["byovd_candidates"]:
             extra = [f for f in d["flags"] if f != "BYOVD_CANDIDATE"]
             extra_str = f" [{', '.join(extra)}]" if extra else ""
             print(f"      {d['name']}{extra_str}")
+
+    # PPL killer candidates
+    ppl_killers = [d for d in results["analyze"] if "PPL_KILLER" in d.get("flags", [])]
+    if ppl_killers:
+        print(f"\n  ☠️  PPL killer potential: {len(ppl_killers)}")
+        for d in ppl_killers:
+            print(f"      {d['name']}")
+
+    # Communication capability
+    comms_drivers = [d for d in results["analyze"] if any(f.startswith("COMMS:") for f in d.get("flags", []))]
+    if comms_drivers:
+        print(f"\n  📡 User-mode comms bridge: {len(comms_drivers)}")
 
     phys_mem = [d for d in results["analyze"] if "PHYS_MEM_RW" in d.get("flags", [])]
     if phys_mem:

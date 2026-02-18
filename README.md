@@ -55,6 +55,11 @@ All weights are configurable via the `WEIGHTS` dict at the top of `driver_triage
 | **Vendor context** | CNA status, bounty programs, driver class (WiFi bonus, audio penalty) | CVE assignment likelihood |
 | **Compound scoring** | MSR+PhysMem=god-mode, IOCTL+no-auth+named-device=easy target | Multi-primitive combinations |
 | **Vuln pattern** | IOCTL surface + dangerous primitive + missing validation | Pattern from 8 confirmed vulns |
+| **WDAC block policy** | Checks Win10/Win11 Microsoft Driver Block Policy by SHA256 + filename | Skips already-blocked drivers |
+| **LOLDrivers (HolyGrail)** | Cross-references SHA256 against HolyGrail's curated LOLDrivers list | Flags known LOLDrivers for variant research |
+| **Comms capability** | IoCreateDevice, IoCreateSymbolicLink, FltRegisterFilter, FltCreateCommunicationPort | User-mode attackable bridge detection |
+| **PPL killer** | ZwTerminateProcess + ZwOpenProcess/PsLookupProcessByProcessId combo | Protected process termination potential |
+| **Enhanced imports** | MmCopyMemory, ZwReadVirtualMemory, KeStackAttachProcess, IoAllocateMdl, etc. | Expanded dangerous primitive coverage |
 
 ### Priority Tiers
 
@@ -125,6 +130,7 @@ The top scorer is auto-explained after every scan.
 | `prefilter.py` | Fast PE import pre-filter |
 | `extract_driverstore.py` | Extracts third-party .sys from Windows DriverStore |
 | `investigated.json` | Drivers already analyzed (skipped on scan) |
+| `policies/` | WDAC block policy JSONs and HolyGrail LOLDrivers data |
 | `test_regression.py` | Regression tests against known ground-truth samples |
 
 ## CLI Reference

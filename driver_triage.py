@@ -123,6 +123,12 @@ WEIGHTS = {
     # HVCI
     "likely_hvci_incompatible": 5,
 
+    # Communication capability (user-mode bridge)
+    "comms_capability": 10,
+
+    # PPL killer potential
+    "ppl_killer_potential": 25,
+
     # WHQL-signed / inbox penalty (stronger negative scoring)
     "whql_signed_inbox": -20,
 
@@ -444,6 +450,18 @@ def check_dangerous_operations(imports):
         "memcpy": ("memcpy_present", "memcpy - potential overflow if sizes unchecked", 5),
         "memmove": ("memmove_present", "memmove present", 3),
         "obreferenceobjectbyname": ("object_reference", "Can reference arbitrary kernel objects", 10),
+        # Physical/MDL (from HolyGrail)
+        "mmgetphysicaladdress": ("maps_physical_memory", "MmGetPhysicalAddress - translates virtual to physical", 15),
+        "mmcopymemory": ("maps_physical_memory", "MmCopyMemory - copies physical/virtual memory", 15),
+        "mmcopyvirtualmemory": ("maps_memory_section", "MmCopyVirtualMemory - cross-process memory copy", 10),
+        "mmallocatepagesformdl": ("maps_locked_pages", "MmAllocatePagesForMdl - allocates physical pages", 10),
+        "ioallocatemdl": ("maps_locked_pages", "IoAllocateMdl - allocates MDL for DMA/mapping", 10),
+        # Section/VM (from HolyGrail)
+        "zwopensection": ("maps_memory_section", "ZwOpenSection - opens named section object", 10),
+        "zwreadvirtualmemory": ("maps_memory_section", "ZwReadVirtualMemory - reads another process memory", 10),
+        "zwwritevirtualmemory": ("maps_memory_section", "ZwWriteVirtualMemory - writes another process memory", 10),
+        # Process (from HolyGrail)
+        "kestackattachprocess": ("maps_memory_section", "KeStackAttachProcess - attaches to another process address space", 10),
         "mmgetsystemroutineaddress": ("dynamic_resolve", "Dynamically resolves kernel functions", 0),  # 66% fire rate
         "zwcreatefile": ("file_operations", "Can create/open files from kernel", 5),
         "zwwritefile": ("file_write", "Can write files from kernel", 5),
@@ -1493,6 +1511,48 @@ def check_cve_history(driver_name, current_year=2026):
     return findings, matched_cves
 
 
+def check_comms_capability(imports):
+    """Check for user-mode communication bridge primitives.
+
+    Drivers WITH comms capability are more interesting because they're
+    attackable from userspace. Checks for: IoCreateDevice, IoCreateSymbolicLink,
+    FltRegisterFilter, FltCreateCommunicationPort, IofCompleteRequest.
+    """
+    findings = []
+    comms_imports = {
+        "iocreatedevice", "iocreatesymboliclink", "fltregisterfilter",
+        "fltcreatecommunicationport", "iofcompleterequest",
+    }
+    found = imports & comms_imports
+    if len(found) >= 2:
+        findings.append({
+            "check": "comms_capability",
+            "detail": "User-mode comms bridge: %s (attackable from userspace)" % ", ".join(found),
+            "score": get_weight("comms_capability"),
+        })
+    return findings
+
+
+def check_ppl_killer(imports):
+    """Check for PPL killer potential.
+
+    Specific combo: ZwTerminateProcess AND (ZwOpenProcess OR PsLookupProcessByProcessId)
+    = can terminate protected processes (AV/EDR/PPL).
+    """
+    findings = []
+    has_terminate = "zwterminateprocess" in imports
+    has_open = "zwopenprocess" in imports
+    has_lookup = "pslookupprocessbyprocessid" in imports
+    if has_terminate and (has_open or has_lookup):
+        opener = "ZwOpenProcess" if has_open else "PsLookupProcessByProcessId"
+        findings.append({
+            "check": "ppl_killer_potential",
+            "detail": "PPL killer: ZwTerminateProcess + %s (can terminate protected processes)" % opener,
+            "score": get_weight("ppl_killer_potential"),
+        })
+    return findings
+
+
 def check_compound_primitives(findings_so_far):
     """Score compound exploit primitives based on combinations.
     
@@ -1993,6 +2053,9 @@ def run():
     all_findings.extend(check_urb_construction(imports, strings))
     # v5: driver class ranking
     all_findings.extend(check_driver_class_ranking(imports, import_dlls))
+    # v6: HolyGrail-inspired checks
+    all_findings.extend(check_comms_capability(imports))
+    all_findings.extend(check_ppl_killer(imports))
     # v5: CVE history check
     cve_findings, matched_cves = check_cve_history(driver_name)
     all_findings.extend(cve_findings)
