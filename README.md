@@ -54,7 +54,7 @@ All weights are configurable via the `WEIGHTS` dict at the top of `driver_triage
 | **Validation gaps** | No ProbeForRead/Write, no auth imports, unchecked memcpy | Missing input validation |
 | **USB/BT** | URB construction, HCI passthrough, eFuse access | Hardware control passthrough |
 | **Firmware** | UEFI variables, HAL bus data, hardcoded crypto keys | Firmware manipulation |
-| **Vendor context** | CNA status, bounty programs, driver class (WiFi bonus, audio penalty) | CVE assignment likelihood |
+| **Vendor context** | CNA status, bounty programs, driver class (WiFi bonus, audio penalty) | Vuln assignment likelihood |
 | **Compound scoring** | MSR+PhysMem=god-mode, IOCTL+no-auth+named-device=easy target | Multi-primitive combinations |
 | **Kernel Rhabdomancer** | Per-function candidate point mapping, call graph from IOCTL dispatch, missing validation detection | Pinpoints *where* dangerous APIs are called, not just that they're imported |
 | **Vuln pattern** | IOCTL surface + dangerous primitive + missing validation | Pattern from 8 confirmed vulns |
@@ -167,9 +167,9 @@ python run_triage.py C:\drivers --no-json --no-report  # CSV only
 ## The Workflow
 
 ```
-DriverStore ──→ extract ──→ Cthaeh triage ──→ ranked list ──→ manual audit
-                                                                   │
-                                              Claude Code + Ghidra MCP ──→ CVE
+DriverStore --> extract --> Cthaeh triage --> ranked list --> manual audit
+                                                                  |
+                                             Claude Code + Ghidra MCP --> vuln
 ```
 
 ## Requirements
