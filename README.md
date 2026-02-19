@@ -27,7 +27,7 @@ python run_triage.py C:\drivers\extracted --ghidra C:\ghidra_11.3
 python run_triage.py --single C:\path\to\suspicious.sys
 
 # Explain a specific driver's score (no rescan needed)
-python run_triage.py --explain amdfendr.sys
+python run_triage.py --explain example.sys
 ```
 
 **That's it.** Pre-filter, parallel workers, JSON output, and markdown report are all on by default. Set `GHIDRA_HOME` env var and you never need `--ghidra` again.
@@ -58,7 +58,7 @@ All weights are configurable via the `WEIGHTS` dict at the top of `driver_triage
 | **Compound scoring** | MSR+PhysMem=god-mode, IOCTL+no-auth+named-device=easy target | Multi-primitive combinations |
 | **Kernel Rhabdomancer** | Per-function candidate point mapping, call graph from IOCTL dispatch, missing validation detection | Pinpoints *where* dangerous APIs are called, not just that they're imported |
 | **Vuln pattern** | IOCTL surface + dangerous primitive + missing validation | Pattern from 8 confirmed vulns |
-| **WDAC block policy** | Checks Win10/Win11 Microsoft Driver Block Policy by SHA256 + filename | Skips already-blocked drivers |
+| **WDAC block policy** | Checks Win10/Win11 driver block policy by SHA256 + filename | Skips already-blocked drivers |
 | **LOLDrivers (HolyGrail)** | Cross-references SHA256 against HolyGrail's curated LOLDrivers list | Flags known LOLDrivers for variant research |
 | **Comms capability** | IoCreateDevice, IoCreateSymbolicLink, FltRegisterFilter, FltCreateCommunicationPort | User-mode attackable bridge detection |
 | **PPL killer** | ZwTerminateProcess + ZwOpenProcess/PsLookupProcessByProcessId combo | Protected process termination potential |
@@ -86,8 +86,8 @@ Drivers you've already analyzed go in `investigated.json`:
 ```json
 {
   "investigated": {
-    "ssudbus2.sys": "4 vulns submitted to Samsung PSIRT (Feb 2026)",
-    "nvpcf.sys": "FP - WDF device interface blocks unprivileged access"
+    "example.sys": "4 vulns submitted to vendor PSIRT",
+    "another.sys": "FP - WDF device interface blocks unprivileged access"
   }
 }
 ```
@@ -109,15 +109,15 @@ Every scan produces (by default):
 Inspect any driver's scoring without re-scanning:
 
 ```bash
-python run_triage.py --explain athw8x.sys
+python run_triage.py --explain example.sys
 ```
 
 ```
 ============================================================
-  EXPLAIN: athw8x.sys
+  EXPLAIN: example.sys
 ============================================================
   Score: 285 | Priority: CRITICAL
-  Vendor: Qualcomm Technologies, Inc.
+  Vendor: Example Corp.
 
   Scored checks:
     +  25  [msr_write] Contains WRMSR instruction(s)
@@ -147,7 +147,7 @@ The top scorer is auto-explained after every scan.
 python run_triage.py C:\drivers                    # Scan with smart defaults
 python run_triage.py C:\drivers --no-prefilter     # Skip pre-filter
 python run_triage.py --single C:\path\to\driver.sys
-python run_triage.py --explain amdfendr.sys        # Explain existing results
+python run_triage.py --explain example.sys        # Explain existing results
 python run_triage.py C:\drivers --workers 8        # Override worker count
 python run_triage.py C:\drivers --no-json --no-report  # CSV only
 ```
