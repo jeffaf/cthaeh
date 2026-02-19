@@ -54,12 +54,18 @@ All weights are configurable via the `WEIGHTS` dict at the top of `driver_triage
 | **Firmware** | UEFI variables, HAL bus data, hardcoded crypto keys | Firmware manipulation |
 | **Vendor context** | CNA status, bounty programs, driver class (WiFi bonus, audio penalty) | CVE assignment likelihood |
 | **Compound scoring** | MSR+PhysMem=god-mode, IOCTL+no-auth+named-device=easy target | Multi-primitive combinations |
+| **Kernel Rhabdomancer** | Per-function candidate point mapping, call graph from IOCTL dispatch, missing validation detection | Pinpoints *where* dangerous APIs are called, not just that they're imported |
 | **Vuln pattern** | IOCTL surface + dangerous primitive + missing validation | Pattern from 8 confirmed vulns |
 | **WDAC block policy** | Checks Win10/Win11 Microsoft Driver Block Policy by SHA256 + filename | Skips already-blocked drivers |
 | **LOLDrivers (HolyGrail)** | Cross-references SHA256 against HolyGrail's curated LOLDrivers list | Flags known LOLDrivers for variant research |
 | **Comms capability** | IoCreateDevice, IoCreateSymbolicLink, FltRegisterFilter, FltCreateCommunicationPort | User-mode attackable bridge detection |
 | **PPL killer** | ZwTerminateProcess + ZwOpenProcess/PsLookupProcessByProcessId combo | Protected process termination potential |
 | **Enhanced imports** | MmCopyMemory, ZwReadVirtualMemory, KeStackAttachProcess, IoAllocateMdl, etc. | Expanded dangerous primitive coverage |
+| **Memory corruption** | UAF, double-free, free-without-null in IOCTL dispatch paths | Instruction-level pattern analysis |
+| **BYOVD expanded** | Arbitrary R/W via MmMapIoSpace, kernel execute via APC/WorkItem, PID termination | Full exploitation primitive coverage |
+| **IORING surface** | IORING APIs, shared memory section patterns | Novel kernel attack surface detection |
+| **Killer driver** | Process enum+kill, callback removal, minifilter unload, EDR product strings | EDR/AV termination pattern detection |
+| **Bloatware/OEM** | Consumer OEM vendor boost, utility driver strings, PE age | Prioritizes historically weak vendors |
 
 ### Priority Tiers
 
@@ -179,7 +185,8 @@ More at [Cred Relay](https://credrelay.com), a monthly newsletter on offensive s
 
 ## Acknowledgments
 
-WDAC block policy checking and LOLDrivers cross-reference inspired by [HolyGrail](https://github.com/BlackSnufkin/Holygrail) by BlackSnufkin.
+- WDAC block policy checking and LOLDrivers cross-reference inspired by [HolyGrail](https://github.com/BlackSnufkin/Holygrail) by BlackSnufkin.
+- Kernel Rhabdomancer candidate point strategy inspired by [Rhabdomancer.java](https://github.com/0xdea/ghidra-scripts/blob/main/Rhabdomancer.java) by Marco Ivaldi (0xdea). See also: [Automating binary vulnerability discovery with Ghidra and Semgrep](https://hnsecurity.it/blog/automating-binary-vulnerability-discovery-with-ghidra-and-semgrep/).
 
 ## License
 
