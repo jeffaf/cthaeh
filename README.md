@@ -2,7 +2,9 @@
 
 *"It sees all the ways the future can branch and blossom from a single moment."*
 
-Automated triage scanner for Windows kernel drivers. Identifies vulnerability indicators to prioritize manual security review. Named after the all-seeing tree from *The Kingkiller Chronicle*.
+Ghidra-powered triage scanner for Windows kernel drivers. Scores drivers on 60+ vulnerability heuristics: dangerous primitives, IOCTL attack surface, missing validation, BYOVD patterns, and more. So you know which `.sys` files to pull apart first.
+
+Named after the all-seeing tree from *The Kingkiller Chronicle*.
 
 Cthaeh doesn't find vulnerabilities. It finds the drivers most likely to *have* them.
 
