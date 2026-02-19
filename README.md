@@ -170,12 +170,6 @@ DriverStore ──→ extract ──→ Cthaeh triage ──→ ranked list ─�
                                               Claude Code + Ghidra MCP ──→ CVE
 ```
 
-## Results
-
-Used this workflow to find 8 kernel driver vulnerabilities across multiple vendors in a single day. Submissions pending with vendor PSIRTs.
-
-More at [Cred Relay](https://credrelay.com), a monthly newsletter on offensive security and AI.
-
 ## Requirements
 
 - Python 3.8+
