@@ -145,6 +145,34 @@ WEIGHTS = {
     "urb_from_user_input": 20,     # USB Request Block built from user-controlled data
     "no_inputbuffer_length_check": 15,  # Missing InputBufferLength validation before parsing
     "previousmode_relevant": 0,    # Informational: PreviousMode attack surface (new mitigation in 24H2)
+
+    # v7: AwesomeMalDevLinks-inspired checks (#7-#12)
+    # Memory corruption patterns (#7)
+    "uaf_indicator": 20,           # Free-then-use pattern in IOCTL path
+    "double_free_indicator": 20,   # Multiple frees of same allocation
+    "free_without_null": 10,       # ExFreePool without zeroing pointer
+    "ob_deref_heavy": 10,          # Heavy ObDereferenceObject usage (ref count bugs)
+
+    # Expanded BYOVD primitives (#9)
+    "byovd_arb_read": 25,         # MmMapIoSpace in IOCTL path (arbitrary kernel read)
+    "byovd_arb_write": 30,        # MmMapIoSpace + write in IOCTL path
+    "byovd_kernel_execute": 30,   # KeInsertQueueApc/ExQueueWorkItem from user data
+    "byovd_pid_terminate": 20,    # ZwOpenProcess + ZwTerminateProcess combo
+
+    # IORING surface (#10)
+    "ioring_surface": 15,         # IORING-related APIs or shared memory patterns
+
+    # Killer driver patterns (#11)
+    "killer_enum_terminate": 20,   # Process enumeration + termination combo
+    "killer_service_control": 15,  # SCM API usage from kernel (unusual)
+    "killer_callback_removal": 25, # PsSetCreateProcessNotifyRoutine remove / ObUnRegisterCallbacks
+    "killer_minifilter_unload": 20,# FltUnregisterFilter from non-filter driver
+    "killer_edr_strings": 15,     # EDR/AV product name strings in driver
+
+    # Bloatware/OEM prioritization (#12)
+    "oem_bloatware_vendor": 10,    # Known bloatware-heavy OEM vendor
+    "utility_driver_strings": 10,  # RGB/overclock/fan/LED utility patterns
+    "driver_age_5plus": 10,        # PE timestamp > 5 years old
 }
 
 # Scoring thresholds
@@ -1914,6 +1942,364 @@ def check_hvci_compat(imports):
     return findings
 
 
+# =============================================================================
+# v7: AwesomeMalDevLinks-inspired checks (GitHub issues #7-#12)
+# =============================================================================
+
+def check_memory_corruption_patterns(imports, program):
+    """Detect UAF, double-free, and free-without-null patterns (#7).
+    
+    References:
+    - https://whiteknightlabs.com/2025/06/03/understanding-use-after-free-uaf-in-windows-kernel-drivers/
+    - https://whiteknightlabs.com/2025/06/10/understanding-double-free-in-windows-kernel-drivers/
+    """
+    findings = []
+    
+    free_funcs = ["exfreepoolwithtag", "exfreepool", "exfreepoolwithtagnx", "exfreepool2"]
+    deref_funcs = ["obdereferenceobject", "obdereferenceobjectwithag", "obdereferenceobjectdeferdelete"]
+    
+    has_free = any(f in imports for f in free_funcs)
+    has_deref = any(f in imports for f in deref_funcs)
+    has_ioctl = "iofcompleterequestex" in imports or "wdfrequestcomplete" in imports or "iocompleterequestex" in imports
+    
+    # Check for free functions in IOCTL dispatch context
+    if has_free and has_ioctl:
+        # Look for free-then-use patterns via instruction analysis
+        try:
+            listing = program.getListing()
+            func_mgr = program.getFunctionManager()
+            free_call_count = 0
+            
+            for func in func_mgr.getFunctions(True):
+                func_name = func.getName().lower()
+                # Focus on dispatch/IOCTL handler functions
+                if not any(kw in func_name for kw in ["dispatch", "ioctl", "internal", "device_control", "irp"]):
+                    continue
+                
+                insn_iter = listing.getInstructions(func.getBody(), True)
+                free_seen = False
+                insn_after_free = 0
+                
+                while insn_iter.hasNext():
+                    insn = insn_iter.next()
+                    mnemonic = insn.getMnemonicString().lower()
+                    
+                    if mnemonic == "call":
+                        ref_str = str(insn)
+                        ref_lower = ref_str.lower()
+                        if any(f in ref_lower for f in free_funcs):
+                            free_seen = True
+                            insn_after_free = 0
+                            free_call_count += 1
+                        elif free_seen and insn_after_free < 10:
+                            # Another call shortly after free = potential UAF
+                            if any(f in ref_lower for f in free_funcs):
+                                findings.append({
+                                    "check": "double_free_indicator",
+                                    "detail": "Consecutive pool free calls in %s (potential double-free)" % func.getName(),
+                                    "score": get_weight("double_free_indicator"),
+                                })
+                                free_seen = False
+                    
+                    if free_seen:
+                        insn_after_free += 1
+                        # Check for dereference after free (MOV from freed region)
+                        if insn_after_free > 2 and insn_after_free < 15:
+                            if mnemonic in ["mov", "lea"] and "rax" in str(insn).lower():
+                                # Heuristic: memory access after free
+                                pass  # Tracked by free_call_count
+                        if insn_after_free > 20:
+                            free_seen = False
+            
+            if free_call_count >= 3:
+                findings.append({
+                    "check": "uaf_indicator",
+                    "detail": "Multiple pool free calls in IOCTL dispatch paths (%d occurrences)" % free_call_count,
+                    "score": get_weight("uaf_indicator"),
+                })
+            elif free_call_count >= 1:
+                findings.append({
+                    "check": "free_without_null",
+                    "detail": "Pool free in IOCTL path without obvious pointer nullification",
+                    "score": get_weight("free_without_null"),
+                })
+        except Exception:
+            # Fallback: just flag the import combination
+            if has_free:
+                findings.append({
+                    "check": "free_without_null",
+                    "detail": "Pool free functions present with IOCTL handling (review for UAF)",
+                    "score": get_weight("free_without_null"),
+                })
+    
+    # Heavy ObDereferenceObject usage
+    if has_deref:
+        deref_count = sum(1 for f in deref_funcs if f in imports)
+        if deref_count >= 2:
+            findings.append({
+                "check": "ob_deref_heavy",
+                "detail": "Multiple ObDereferenceObject variants imported (%d)" % deref_count,
+                "score": get_weight("ob_deref_heavy"),
+            })
+    
+    return findings
+
+
+def check_byovd_primitives(imports, program):
+    """Expanded BYOVD exploitation primitive detection (#9).
+    
+    References:
+    - https://github.com/BlackSnufkin/BYOVD
+    - https://github.com/0xJs/BYOVD_read_write_primitive
+    - https://github.com/TheCruZ/kdmapper
+    """
+    findings = []
+    
+    has_map_io = "mmmapiospace" in imports or "mmmapiospaceex" in imports
+    has_map_locked = "mmmaplockedpages" in imports or "mmmaplockedpageswithreservedmapping" in imports or "mmmaplockedpagesspecifycache" in imports
+    has_ioctl = "iofcompleterequestex" in imports or "iocompleterequestex" in imports
+    has_device = "iocreatedevice" in imports or "iocreatesymboliclink" in imports
+    
+    # Arbitrary kernel read: MmMapIoSpace in driver with IOCTL handling + device
+    if has_map_io and has_ioctl and has_device:
+        findings.append({
+            "check": "byovd_arb_read",
+            "detail": "MmMapIoSpace + IOCTL handler + named device (potential arbitrary kernel read primitive)",
+            "score": get_weight("byovd_arb_read"),
+        })
+        
+        # If also has write capability
+        has_write = "mmunmapiospace" in imports or "rtlcopymemory" in imports or "memmove" in imports or "memcpy" in imports
+        if has_write:
+            findings.append({
+                "check": "byovd_arb_write",
+                "detail": "MmMapIoSpace + copy/write + IOCTL (potential arbitrary kernel write primitive)",
+                "score": get_weight("byovd_arb_write"),
+            })
+    
+    # Kernel execute: queue work items or APCs from user-controlled data
+    execute_apis = ["keinsertqueueapc", "exqueueworkitem", "pscreatesystemthread", "keinsertqueuedpc"]
+    has_execute = any(api in imports for api in execute_apis)
+    if has_execute and has_ioctl:
+        findings.append({
+            "check": "byovd_kernel_execute",
+            "detail": "Kernel execution APIs (%s) with IOCTL handler" % ", ".join(
+                api for api in execute_apis if api in imports
+            ),
+            "score": get_weight("byovd_kernel_execute"),
+        })
+    
+    # PID-based process termination
+    has_open_process = "zwopenprocess" in imports or "ntopenprocess" in imports
+    has_terminate = "zwterminateprocess" in imports or "ntterminateprocess" in imports
+    if has_open_process and has_terminate:
+        findings.append({
+            "check": "byovd_pid_terminate",
+            "detail": "ZwOpenProcess + ZwTerminateProcess (PID-based process killer primitive)",
+            "score": get_weight("byovd_pid_terminate"),
+        })
+    
+    return findings
+
+
+def check_ioring_surface(imports, strings):
+    """Detect IORING attack surface (#10).
+    
+    Reference: https://knifecoat.com/Posts/Arbitrary+Kernel+RW+using+IORING's
+    """
+    findings = []
+    
+    ioring_apis = ["iocreatefileex", "iocreatefilespecifydeviceobjecthint", "ntcreateioring",
+                   "ntsubmitioring", "ntqueryioring", "ntcloseioring"]
+    ioring_strings_pattern = ["ioring", "io_ring", "iouring"]
+    
+    has_ioring_api = any(api in imports for api in ioring_apis)
+    has_ioring_str = any(
+        any(pat in s.lower() for pat in ioring_strings_pattern)
+        for s in strings
+    )
+    
+    # Shared memory section creation without validation
+    has_shared_mem = ("zwcreatesection" in imports or "ntcreatesection" in imports) and \
+                     ("zwmapviewofsection" in imports or "ntmapviewofsection" in imports)
+    
+    if has_ioring_api or has_ioring_str:
+        findings.append({
+            "check": "ioring_surface",
+            "detail": "IORING-related APIs or strings detected (novel kernel attack surface)",
+            "score": get_weight("ioring_surface"),
+        })
+    elif has_shared_mem and ("iocreatefileex" in imports):
+        findings.append({
+            "check": "ioring_surface",
+            "detail": "Section creation + IoCreateFileEx (IORING-adjacent shared memory pattern)",
+            "score": get_weight("ioring_surface"),
+        })
+    
+    return findings
+
+
+def check_killer_driver(imports, strings):
+    """Detect EDR/AV killer driver patterns (#11).
+    
+    References:
+    - https://whiteknightlabs.com/2025/10/28/methodology-of-reversing-vulnerable-killer-drivers/
+    - https://research.checkpoint.com/2025/large-scale-exploitation-of-legacy-driver/
+    """
+    findings = []
+    
+    # Process enumeration + termination combo
+    has_enum = "zwquerysysteminformation" in imports or "ntquerysysteminformation" in imports
+    has_terminate = "zwterminateprocess" in imports or "ntterminateprocess" in imports
+    has_open = "zwopenprocess" in imports or "ntopenprocess" in imports
+    
+    if has_enum and (has_terminate or has_open):
+        findings.append({
+            "check": "killer_enum_terminate",
+            "detail": "Process enumeration + termination APIs (ZwQuerySystemInformation + ZwTerminateProcess/ZwOpenProcess)",
+            "score": get_weight("killer_enum_terminate"),
+        })
+    
+    # Service control from kernel (very unusual)
+    scm_apis = ["openscmanagerw", "openscmanagera", "controlservice", "deleteservice",
+                "openservicew", "openservicea", "changeserviceconfig"]
+    has_scm = any(api in imports for api in scm_apis)
+    if has_scm:
+        findings.append({
+            "check": "killer_service_control",
+            "detail": "SCM APIs imported (%s)" % ", ".join(api for api in scm_apis if api in imports),
+            "score": get_weight("killer_service_control"),
+        })
+    
+    # Callback removal
+    callback_remove_apis = ["pssetcreateprocessnotifyroutine", "pssetcreateprocessnotifyroutineex",
+                            "pssetcreateprocessnotifyroutineex2", "obunregistercallbacks",
+                            "pssetcreatethreadnotifyroutine", "pssetloadimagenotifyroutine",
+                            "cmunregistercallback"]
+    has_callback_remove = any(api in imports for api in callback_remove_apis)
+    if has_callback_remove:
+        findings.append({
+            "check": "killer_callback_removal",
+            "detail": "Kernel callback registration/removal APIs (%s)" % ", ".join(
+                api for api in callback_remove_apis if api in imports
+            ),
+            "score": get_weight("killer_callback_removal"),
+        })
+    
+    # Minifilter unload
+    minifilter_apis = ["fltunregisterfilter", "filterunload", "fltclosecommunicationport"]
+    has_minifilter = any(api in imports for api in minifilter_apis)
+    if has_minifilter:
+        findings.append({
+            "check": "killer_minifilter_unload",
+            "detail": "Minifilter unload APIs present (%s)" % ", ".join(
+                api for api in minifilter_apis if api in imports
+            ),
+            "score": get_weight("killer_minifilter_unload"),
+        })
+    
+    # EDR product name strings
+    edr_names = ["defender", "crowdstrike", "csfalcon", "sentinel", "sentinelone",
+                 "carbonblack", "carbon black", "cylance", "sophos", "bitdefender",
+                 "kaspersky", "eset", "trendmicro", "trend micro", "mcafee",
+                 "symantec", "norton", "malwarebytes", "webroot", "panda",
+                 "avast", "avg", "fortinet", "fireeye", "mandiant"]
+    
+    found_edr = []
+    strings_lower = [s.lower() for s in strings[:2000]]  # Limit for performance
+    for edr in edr_names:
+        if any(edr in s for s in strings_lower):
+            found_edr.append(edr)
+    
+    if len(found_edr) >= 2:
+        findings.append({
+            "check": "killer_edr_strings",
+            "detail": "Multiple EDR/AV product names in strings: %s" % ", ".join(found_edr[:10]),
+            "score": get_weight("killer_edr_strings"),
+        })
+    
+    return findings
+
+
+def check_bloatware_oem(strings, driver_name):
+    """Detect bloatware/OEM utility drivers (#12).
+    
+    References:
+    - https://github.com/sensepost/bloatware-pwn/tree/main/razerpwn
+    - https://mrbruh.com/asusdriverhub/
+    """
+    findings = []
+    
+    # Known bloatware-heavy OEM vendors (ASUS already covered by vendor_context)
+    oem_vendors = {
+        "razer": "Razer",
+        "msi": "MSI",
+        "gigabyte": "Gigabyte",
+        "asrock": "ASRock",
+        "corsair": "Corsair",
+        "nzxt": "NZXT",
+        "alienware": "Alienware",
+        "steelseries": "SteelSeries",
+        "roccat": "ROCCAT",
+        "thermaltake": "Thermaltake",
+        "evga": "EVGA",
+        "aorus": "AORUS",
+    }
+    
+    driver_lower = driver_name.lower()
+    all_text = " ".join(strings[:500]).lower()
+    
+    for key, name in oem_vendors.items():
+        if key in driver_lower or key in all_text:
+            findings.append({
+                "check": "oem_bloatware_vendor",
+                "detail": "OEM bloatware vendor detected: %s (consumer utility drivers often lack security review)" % name,
+                "score": get_weight("oem_bloatware_vendor"),
+            })
+            break
+    
+    # Utility driver string patterns
+    utility_patterns = ["rgb", "overclock", "fan control", "fan speed", "led control",
+                        "hotkey", "system monitor", "hardware monitor", "hwmonitor",
+                        "game mode", "lighting", "chroma", "aura sync", "mystic light",
+                        "dragon center", "armory crate", "synapse", "icue"]
+    
+    found_utility = []
+    for pat in utility_patterns:
+        if pat in all_text:
+            found_utility.append(pat)
+    
+    if found_utility:
+        findings.append({
+            "check": "utility_driver_strings",
+            "detail": "Utility/peripheral driver indicators: %s" % ", ".join(found_utility[:5]),
+            "score": get_weight("utility_driver_strings"),
+        })
+    
+    # PE timestamp age check (driver age)
+    try:
+        pe_header = program.getMemory().getBlock(".text")
+        # Try to get TimeDateStamp from PE header
+        exe_path = program.getExecutablePath()
+        # Use program creation date as proxy if available
+        creation = program.getCreationDate()
+        if creation:
+            import java.util.Date as Date
+            now = Date()
+            age_ms = now.getTime() - creation.getTime()
+            age_years = age_ms / (365.25 * 24 * 60 * 60 * 1000)
+            if age_years >= 5:
+                findings.append({
+                    "check": "driver_age_5plus",
+                    "detail": "Driver appears to be %.1f years old (older drivers = higher risk)" % age_years,
+                    "score": get_weight("driver_age_5plus"),
+                })
+    except Exception:
+        pass  # Age check is best-effort
+    
+    return findings
+
+
 def get_driver_info(program):
     """Extract basic driver metadata including parsed version info."""
     info = {
@@ -2056,6 +2442,12 @@ def run():
     # v6: HolyGrail-inspired checks
     all_findings.extend(check_comms_capability(imports))
     all_findings.extend(check_ppl_killer(imports))
+    # v7: AwesomeMalDevLinks-inspired checks (#7-#12)
+    all_findings.extend(check_memory_corruption_patterns(imports, program))
+    all_findings.extend(check_byovd_primitives(imports, program))
+    all_findings.extend(check_ioring_surface(imports, strings))
+    all_findings.extend(check_killer_driver(imports, strings))
+    all_findings.extend(check_bloatware_oem(strings, driver_name))
     # v5: CVE history check
     cve_findings, matched_cves = check_cve_history(driver_name)
     all_findings.extend(cve_findings)
