@@ -173,6 +173,12 @@ WEIGHTS = {
     "oem_bloatware_vendor": 10,    # Known bloatware-heavy OEM vendor
     "utility_driver_strings": 10,  # RGB/overclock/fan/LED utility patterns
     "driver_age_5plus": 10,        # PE timestamp > 5 years old
+
+    # Kernel Rhabdomancer - candidate point analysis
+    "candidate_tier0_ioctl": 25,   # Critical API in IOCTL dispatch path
+    "candidate_tier0_other": 10,   # Critical API outside IOCTL path
+    "candidate_tier1_ioctl": 8,    # Interesting APIs in IOCTL path (3+)
+    "candidate_no_validation": 15, # Dangerous API in IOCTL path without ProbeForRead/Write
 }
 
 # Scoring thresholds
@@ -2300,6 +2306,293 @@ def check_bloatware_oem(strings, driver_name):
     return findings
 
 
+def check_candidate_points(program, imports):
+    """Kernel Rhabdomancer: per-function dangerous API call mapping with
+    call graph proximity to IOCTL dispatch (#13 / Option B).
+    
+    Inspired by 0xdea/Rhabdomancer.java but adapted for kernel drivers
+    and implemented in pure Jython (no decompiler dependency).
+    
+    Strategy:
+    1. Build kernel-specific candidate point tiers (dangerous APIs)
+    2. Walk every function, find CALL instructions to dangerous APIs
+    3. Identify IOCTL dispatch functions via heuristics
+    4. Score based on: tier level, proximity to IOCTL path, missing validation
+    
+    References:
+    - https://github.com/0xdea/ghidra-scripts/blob/main/Rhabdomancer.java
+    - https://hnsecurity.it/blog/automating-binary-vulnerability-discovery-with-ghidra-and-semgrep/
+    """
+    findings = []
+    
+    # --- Kernel candidate point tiers ---
+    # Tier 0: Critical - direct exploitation primitives
+    TIER0 = {
+        "mmmapiospace": "MmMapIoSpace (physical memory mapping)",
+        "mmmapiospaceex": "MmMapIoSpaceEx (physical memory mapping)",
+        "mmmaplockedpagesspecifycache": "MmMapLockedPagesSpecifyCache (locked pages to user)",
+        "mmmaplockedpages": "MmMapLockedPages (locked pages mapping)",
+        "zwmapviewofsection": "ZwMapViewOfSection (section mapping)",
+        "ntmapviewofsection": "NtMapViewOfSection (section mapping)",
+        "rtlcopymemory": "RtlCopyMemory (kernel memcpy)",
+        "memmove": "memmove (memory copy)",
+        "memcpy": "memcpy (memory copy)",
+        "zwterminateprocess": "ZwTerminateProcess (process kill)",
+        "ntterminateprocess": "NtTerminateProcess (process kill)",
+        "keinsertqueueapc": "KeInsertQueueApc (APC injection)",
+        "exqueueworkitem": "ExQueueWorkItem (kernel work item)",
+        "zwwritefile": "ZwWriteFile (kernel file write)",
+        "ntwritefile": "NtWriteFile (kernel file write)",
+        "wrmsr": "WRMSR (MSR write)",
+    }
+    
+    # Tier 1: Interesting - often part of exploit chains
+    TIER1 = {
+        "exallocatepool": "ExAllocatePool (deprecated, no tag)",
+        "exallocatepoolwithtag": "ExAllocatePoolWithTag",
+        "exallocatepool2": "ExAllocatePool2",
+        "obreferenceobjectbyhandle": "ObReferenceObjectByHandle",
+        "zwopenprocess": "ZwOpenProcess",
+        "ntopenprocess": "NtOpenProcess",
+        "zwcreatesection": "ZwCreateSection",
+        "iocreatedevice": "IoCreateDevice",
+        "iocreatesymboliclink": "IoCreateSymbolicLink",
+        "exfreepoolwithtag": "ExFreePoolWithTag",
+        "exfreepool": "ExFreePool",
+        "obdereferenceobject": "ObDereferenceObject",
+        "zwsetvaluekey": "ZwSetValueKey (registry write)",
+        "zwcreatefile": "ZwCreateFile",
+        "rdmsr": "RDMSR (MSR read)",
+    }
+    
+    # Tier 2: Review - context-dependent
+    TIER2 = {
+        "kestackattachprocess": "KeStackAttachProcess",
+        "iogetdeviceobjectpointer": "IoGetDeviceObjectPointer",
+        "zwquerysysteminformation": "ZwQuerySystemInformation",
+        "ntquerysysteminformation": "NtQuerySystemInformation",
+        "pslookupprocessbyprocessid": "PsLookupProcessByProcessId",
+        "mmgetsystemroutineaddress": "MmGetSystemRoutineAddress",
+        "zwloaddriver": "ZwLoadDriver",
+        "zwunloaddriver": "ZwUnloadDriver",
+        "iocreatefile": "IoCreateFile",
+        "iocalldriver": "IoCallDriver (IRP forwarding)",
+    }
+    
+    # Validation functions (their presence near dangerous calls = safer)
+    VALIDATION_FUNCS = {
+        "probeforread", "probeforwrite", "mmprobeandlockpages",
+        "exgetpreviousmode", "sestatus", "ioverifyirpstacklocation",
+    }
+    
+    # --- Step 1: Identify IOCTL dispatch functions ---
+    # Heuristic: functions with multiple IOCTL-like constants in CMP instructions
+    listing = program.getListing()
+    func_mgr = program.getFunctionManager()
+    
+    ioctl_dispatch_funcs = set()  # function entry addresses
+    all_func_names = {}  # addr -> name mapping
+    
+    for func in func_mgr.getFunctions(True):
+        fname = func.getName().lower()
+        all_func_names[func.getEntryPoint().toString()] = func.getName()
+        
+        # Name-based heuristic
+        if any(kw in fname for kw in ["dispatch", "ioctl", "devicecontrol", "device_control", "irp_mj"]):
+            ioctl_dispatch_funcs.add(func.getEntryPoint().toString())
+            continue
+        
+        # Constant-based heuristic: count IOCTL-shaped constants in CMP/SUB
+        try:
+            body = func.getBody()
+            inst_iter = listing.getInstructions(body, True)
+            ioctl_consts = 0
+            while inst_iter.hasNext():
+                insn = inst_iter.next()
+                mnemonic = insn.getMnemonicString().lower()
+                if mnemonic in ("cmp", "sub"):
+                    for i in range(insn.getNumOperands()):
+                        try:
+                            val = insn.getScalar(i)
+                            if val is not None:
+                                v = val.getUnsignedValue()
+                                # IOCTL codes: bits 16-31 = device type, bits 2-13 = function
+                                if 0x220000 <= v <= 0x2F0FFF or 0x80000 <= v <= 0x8F0FFF:
+                                    ioctl_consts += 1
+                        except:
+                            pass
+            if ioctl_consts >= 2:
+                ioctl_dispatch_funcs.add(func.getEntryPoint().toString())
+        except:
+            pass
+    
+    # --- Step 2: Build call-from-dispatch set (1 level deep) ---
+    dispatch_callees = set()  # functions called from IOCTL dispatch
+    for func in func_mgr.getFunctions(True):
+        if func.getEntryPoint().toString() in ioctl_dispatch_funcs:
+            try:
+                for callee in func.getCalledFunctions(None):
+                    dispatch_callees.add(callee.getEntryPoint().toString())
+            except:
+                pass
+    
+    # --- Step 3: Walk all functions, find candidate points ---
+    candidate_points = []  # list of {func, api, tier, in_ioctl_path, has_validation}
+    
+    # Build a set of all dangerous API names (lowercased) for fast lookup
+    all_dangerous = {}
+    for api, desc in TIER0.items():
+        all_dangerous[api] = (0, desc)
+    for api, desc in TIER1.items():
+        all_dangerous[api] = (1, desc)
+    for api, desc in TIER2.items():
+        all_dangerous[api] = (2, desc)
+    
+    for func in func_mgr.getFunctions(True):
+        func_addr = func.getEntryPoint().toString()
+        func_name = func.getName()
+        
+        # Skip thunks and tiny functions
+        try:
+            if func.isThunk():
+                continue
+            body = func.getBody()
+            if body.getNumAddresses() < 8:
+                continue
+        except:
+            continue
+        
+        # Determine if this function is in the IOCTL path
+        is_dispatch = func_addr in ioctl_dispatch_funcs
+        is_dispatch_callee = func_addr in dispatch_callees
+        in_ioctl_path = is_dispatch or is_dispatch_callee
+        
+        # Scan for validation functions in this function
+        has_validation = False
+        dangerous_calls = []
+        
+        try:
+            inst_iter = listing.getInstructions(body, True)
+            while inst_iter.hasNext():
+                insn = inst_iter.next()
+                mnemonic = insn.getMnemonicString().lower()
+                
+                if mnemonic == "call":
+                    insn_str = str(insn).lower()
+                    
+                    # Check for validation
+                    for vfunc in VALIDATION_FUNCS:
+                        if vfunc in insn_str:
+                            has_validation = True
+                    
+                    # Check for dangerous APIs
+                    for api, (tier, desc) in all_dangerous.items():
+                        if api in insn_str:
+                            dangerous_calls.append({
+                                "api": api,
+                                "desc": desc,
+                                "tier": tier,
+                                "address": insn.getAddress().toString(),
+                            })
+        except:
+            continue
+        
+        for call in dangerous_calls:
+            candidate_points.append({
+                "func": func_name,
+                "func_addr": func_addr,
+                "api": call["api"],
+                "desc": call["desc"],
+                "tier": call["tier"],
+                "address": call["address"],
+                "in_ioctl_path": in_ioctl_path,
+                "has_validation": has_validation,
+            })
+    
+    # --- Step 4: Score candidate points ---
+    tier0_ioctl = []
+    tier0_other = []
+    tier1_ioctl = []
+    no_validation_dangerous = []
+    
+    for cp in candidate_points:
+        if cp["tier"] == 0:
+            if cp["in_ioctl_path"]:
+                tier0_ioctl.append(cp)
+            else:
+                tier0_other.append(cp)
+        elif cp["tier"] == 1 and cp["in_ioctl_path"]:
+            tier1_ioctl.append(cp)
+        
+        if cp["tier"] <= 1 and cp["in_ioctl_path"] and not cp["has_validation"]:
+            no_validation_dangerous.append(cp)
+    
+    # Generate findings
+    if tier0_ioctl:
+        # Group by unique APIs for cleaner output
+        apis_seen = {}
+        for cp in tier0_ioctl:
+            key = cp["api"]
+            if key not in apis_seen:
+                apis_seen[key] = cp
+        
+        detail_parts = []
+        for api, cp in apis_seen.items():
+            detail_parts.append("%s in %s @ %s" % (cp["desc"], cp["func"], cp["address"]))
+        
+        findings.append({
+            "check": "candidate_tier0_ioctl",
+            "detail": "Critical APIs in IOCTL dispatch path: %s" % "; ".join(detail_parts[:5]),
+            "score": get_weight("candidate_tier0_ioctl"),
+            "candidate_count": len(tier0_ioctl),
+            "candidates": [{"func": cp["func"], "api": cp["api"], "addr": cp["address"]} for cp in tier0_ioctl[:10]],
+        })
+    
+    if tier0_other:
+        findings.append({
+            "check": "candidate_tier0_other",
+            "detail": "Critical APIs outside IOCTL path (%d call sites across %d unique APIs)" % (
+                len(tier0_other), len(set(cp["api"] for cp in tier0_other))
+            ),
+            "score": get_weight("candidate_tier0_other"),
+        })
+    
+    if tier1_ioctl and len(tier1_ioctl) >= 3:
+        findings.append({
+            "check": "candidate_tier1_ioctl",
+            "detail": "Multiple interesting APIs in IOCTL path (%d call sites)" % len(tier1_ioctl),
+            "score": get_weight("candidate_tier1_ioctl"),
+        })
+    
+    if no_validation_dangerous:
+        apis = set(cp["desc"] for cp in no_validation_dangerous)
+        findings.append({
+            "check": "candidate_no_validation",
+            "detail": "Dangerous APIs in IOCTL path WITHOUT ProbeForRead/Write: %s" % ", ".join(list(apis)[:5]),
+            "score": get_weight("candidate_no_validation"),
+            "unvalidated_count": len(no_validation_dangerous),
+        })
+    
+    # Summary metadata (always include for reporting, even if score is 0)
+    if candidate_points:
+        findings.append({
+            "check": "candidate_point_summary",
+            "detail": "Rhabdomancer: %d candidate points (%d tier0, %d tier1, %d tier2), %d in IOCTL path, %d dispatch funcs identified" % (
+                len(candidate_points),
+                len([cp for cp in candidate_points if cp["tier"] == 0]),
+                len([cp for cp in candidate_points if cp["tier"] == 1]),
+                len([cp for cp in candidate_points if cp["tier"] == 2]),
+                len([cp for cp in candidate_points if cp["in_ioctl_path"]]),
+                len(ioctl_dispatch_funcs),
+            ),
+            "score": 0,  # Informational
+            "total_candidates": len(candidate_points),
+            "dispatch_functions": list(ioctl_dispatch_funcs)[:10],
+        })
+    
+    return findings
+
+
 def get_driver_info(program):
     """Extract basic driver metadata including parsed version info."""
     info = {
@@ -2448,6 +2741,8 @@ def run():
     all_findings.extend(check_ioring_surface(imports, strings))
     all_findings.extend(check_killer_driver(imports, strings))
     all_findings.extend(check_bloatware_oem(strings, driver_name))
+    # v7.1: Kernel Rhabdomancer - candidate point analysis (call graph + per-function API mapping)
+    all_findings.extend(check_candidate_points(program, imports))
     # v5: CVE history check
     cve_findings, matched_cves = check_cve_history(driver_name)
     all_findings.extend(cve_findings)
