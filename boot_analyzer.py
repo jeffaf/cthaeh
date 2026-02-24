@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Cthaeh Boot Analyzer - Find drivers blindly accessing HKLM\SOFTWARE during Phase 0/1 boot
+Cthaeh Boot Analyzer - Find drivers blindly accessing HKLM\\SOFTWARE during Phase 0/1 boot
 
 During Windows boot Phase 0/1, only the SYSTEM hive is loaded. Drivers that attempt
-to access HKLM\SOFTWARE at this stage get NAME NOT FOUND — revealing they operate in
+to access HKLM\\SOFTWARE at this stage get NAME NOT FOUND — revealing they operate in
 an "EDR blind spot" where monitoring is not yet active.
 
 Reference: Jiří Vinopal's research on EDR Phase 0 blind spots — boot-start drivers
@@ -128,7 +128,10 @@ def analyze(entries):
 
         times_sorted = sorted(data["times"])
         is_blind_spot = (
-            start_type in (0, 1) and data["count"] >= HIGH_HIT_THRESHOLD
+            # Boot/system start drivers hitting missing keys = classic blind spot
+            (start_type in (0, 1) and data["count"] >= 1)
+            # Any driver with high hit count is suspicious regardless of start type
+            or data["count"] >= HIGH_HIT_THRESHOLD
         )
 
         results.append({
