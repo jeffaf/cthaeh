@@ -288,6 +288,54 @@ DISK_ACCESS_STRINGS = {
 # Skip drivers larger than this (huge drivers = slow Ghidra analysis)
 MAX_SIZE_BYTES = 5 * 1024 * 1024  # 5MB default
 
+
+# --- YAML Scoring Config ---
+def _load_prefilter_scoring_yaml():
+    """Load prefilter scoring from YAML config file.
+
+    Search path: __file__ dir, cwd, CTHAEH_SCORING_PATH env var.
+    Returns dict of prefilter scoring values, or empty dict if unavailable.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return {}
+
+    candidates = []
+
+    # 1. Same directory as this script
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "scoring_rules.yaml"))
+    except Exception:
+        pass
+
+    # 2. Current working directory
+    candidates.append(os.path.join(os.getcwd(), "scoring_rules.yaml"))
+
+    # 3. Environment variable override (highest priority, inserted first)
+    env_path = os.environ.get("CTHAEH_SCORING_PATH")
+    if env_path:
+        candidates.insert(0, env_path)
+
+    for yaml_path in candidates:
+        try:
+            with open(yaml_path, "r") as f:
+                data = yaml.safe_load(f)
+            if data and "prefilter" in data:
+                return data["prefilter"]
+        except Exception:
+            continue
+
+    return {}
+
+
+_PREFILTER_YAML = _load_prefilter_scoring_yaml()
+
+
+def _pf_score(key, default):
+    """Get a prefilter scoring value from YAML config or hardcoded default."""
+    return _PREFILTER_YAML.get(key, default)
+
 # LOLDrivers cache file
 LOLDRIVERS_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".loldrivers_cache.json")
 LOLDRIVERS_URL = "https://www.loldrivers.io/api/drivers.json"
@@ -564,21 +612,21 @@ def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_name
     if not has_interesting:
         return False, "no device/IOCTL imports", 0, flags, signer, driver_class
 
-    # Count high-risk imports as a hint
-    high_risk_count = len(imports & HIGH_RISK_IMPORTS)
+    # Count high-risk imports as a hint (each worth 1 point from YAML or default)
+    high_risk_count = len(imports & HIGH_RISK_IMPORTS) * _pf_score("high_risk_bonus", 1)
 
     # Communication capability detection (user-mode bridge)
     comms_found = {i for i in imports if i in COMMS_IMPORTS}
     if len(comms_found) >= 2:
         flags.append(f"COMMS:{'+'.join(sorted(comms_found))}")
-        high_risk_count += 2  # More interesting - attackable from userspace
+        high_risk_count += _pf_score("comms_bonus", 2)
 
     # BYOVD process killer detection
     has_opener = bool(imports & BYOVD_OPENERS)
     has_terminator = bool(imports & BYOVD_TERMINATORS)
     if has_opener and has_terminator:
         flags.append("BYOVD_CANDIDATE")
-        high_risk_count += 3  # Boost priority
+        high_risk_count += _pf_score("byovd_candidate_bonus", 3)
 
     # PPL killer potential: ZwTerminateProcess + (ZwOpenProcess | PsLookupProcessByProcessId)
     has_zw_terminate = "ZwTerminateProcess" in imports
@@ -586,13 +634,13 @@ def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_name
     has_ps_lookup = "PsLookupProcessByProcessId" in imports
     if has_zw_terminate and (has_zw_open or has_ps_lookup):
         flags.append("PPL_KILLER")
-        high_risk_count += 4  # High-value scoring bonus
+        high_risk_count += _pf_score("ppl_killer_bonus", 4)
 
     # Physical memory R/W detection
     phys_mem_count = len(imports & PHYS_MEM_INDICATORS)
     if phys_mem_count >= 2:
         flags.append("PHYS_MEM_RW")
-        high_risk_count += 2
+        high_risk_count += _pf_score("phys_mem_rw_bonus", 2)
 
     # MmMapIoSpace alone is notable
     if "MmMapIoSpace" in imports:
@@ -603,28 +651,33 @@ def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_name
     token_imports = imports & TOKEN_STEAL_IMPORTS
     if len(token_imports) >= 2:
         flags.append("TOKEN_STEAL")
-        high_risk_count += 2
+        high_risk_count += _pf_score("token_steal_bonus", 2)
     elif "PsLookupProcessByProcessId" in imports:
         flags.append("PROCESS_LOOKUP")
-        high_risk_count += 1
+        high_risk_count += _pf_score("process_lookup_bonus", 1)
 
     # Registry manipulation from kernel
     reg_imports = imports & REGISTRY_IMPORTS
     if len(reg_imports) >= 2:
         flags.append("REGISTRY_RW")
-        high_risk_count += 1
+        high_risk_count += _pf_score("registry_rw_bonus", 1)
 
     # Firmware/SPI access
     fw_imports = imports & FIRMWARE_IMPORTS
     if fw_imports:
         flags.append("FIRMWARE_ACCESS")
-        high_risk_count += 2
+        high_risk_count += _pf_score("firmware_access_bonus", 2)
 
     # --- Boot phase scoring ---
     # Drivers that load early in boot operate before EDR can install hooks.
     # Ref: Jiří Vinopal EDR Phase 0 blind spots
     start_type, boot_phase = get_driver_start_type(driver_path)
-    boot_bonus = BOOT_PHASE_BONUS.get(start_type, 0)
+    if start_type == 0:
+        boot_bonus = _pf_score("boot_phase_0_bonus", 15)
+    elif start_type == 1:
+        boot_bonus = _pf_score("boot_phase_1_bonus", 10)
+    else:
+        boot_bonus = 0
     if boot_bonus:
         high_risk_count += boot_bonus
         flags.append(f"BOOT_PHASE:{boot_phase}")
@@ -741,7 +794,7 @@ def prefilter_directory(drivers_dir, max_size=MAX_SIZE_BYTES, check_loldrivers=F
             driver_lower = entry["name"].lower()
             if driver_lower in boot_log_data:
                 boot_entry = boot_log_data[driver_lower]
-                entry["risk_hint"] += BOOT_LOG_BLIND_SPOT_BONUS
+                entry["risk_hint"] += _pf_score("boot_log_blind_spot_bonus", BOOT_LOG_BLIND_SPOT_BONUS)
                 entry["boot_blind_spot"] = True
                 entry["boot_log_hits"] = boot_entry.get("name_not_found_count", 0)
                 if not any(f.startswith("BOOT_BLIND_SPOT") for f in entry["flags"]):

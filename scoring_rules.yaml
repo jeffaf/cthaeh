@@ -1,0 +1,218 @@
+# Cthaeh Scoring Rules
+# Externalized from driver_triage.py WEIGHTS dict and prefilter.py constants.
+# Positive = increases risk score, Negative = reduces risk score.
+#
+# Both driver_triage.py (Ghidra/Jython) and prefilter.py (CPython) load this file.
+# If this file is missing, both fall back to their hardcoded defaults.
+
+# --- Priority thresholds ---
+thresholds:
+  CRITICAL: 250   # ~1.2% of drivers. Drop everything and analyze.
+  HIGH: 150       # ~15%. Strong candidates, investigate soon.
+  MEDIUM: 75      # Worth a look.
+  LOW: 30         # Probably boring.
+
+# --- Ghidra triage weights (driver_triage.py) ---
+weights:
+  # Device creation & IOCTL handling
+  insecure_device_creation: 15
+  has_ioctl_handler: 10
+  method_neither_heavy: 10
+  file_any_access_heavy: 10
+  no_probe_functions: 10
+
+  # Pool & memory operations
+  deprecated_pool_alloc: 10
+  maps_physical_memory: 15
+  maps_memory_section: 10
+  maps_locked_pages: 10
+  maps_locked_pages_cache: 10
+  object_reference: 10
+  file_operations: 5
+  file_write: 5
+  file_read: 5
+  memcpy_present: 5
+  memmove_present: 3
+
+  # BYOVD
+  byovd_process_killer: 20
+
+  # Physical memory
+  physical_memory_rw: 15
+
+  # MSR / CR access
+  msr_write: 25
+  msr_read: 15
+  control_register_access: 20
+
+  # Token stealing
+  token_steal_primitives: 15
+  process_lookup: 5
+
+  # Known-bad codebases
+  winio_codebase: 25
+  dse_bypass_indicator: 20
+
+  # Firmware / disk / registry
+  firmware_bus_access: 15
+  raw_disk_access: 15
+  kernel_registry_write: 10
+
+  # Driver structure
+  thin_driver_critical: 15
+  thin_driver: 8
+  unchecked_copy: 20
+  weak_copy_validation: 10
+
+  # Internal validation (negative = FP reducer)
+  has_internal_validation: -10
+
+  # Vendor context
+  vendor_cna_bounty: 20
+  vendor_cna: 10
+
+  # Driver class
+  wifi_driver: 15
+  audio_class_driver: -15
+  windows_inbox_driver: -15
+
+  # IOCTL surface
+  massive_ioctl_surface: 15
+  large_ioctl_surface: 10
+  moderate_ioctl_surface: 5
+
+  # Device interface
+  named_device: 15
+  device_interface_guid: 5
+
+  # LOLDrivers
+  loldrivers_known: -30
+
+  # v4.1 research-driven checks
+  symlink_no_acl: 20
+  has_auth_checks: 5
+  no_auth_imports: 10
+  usb_request_forwarding: 10
+  bt_driver_crypto: 15
+  bt_driver: 5
+  efuse_access: 20
+  wmi_method_execution: 15
+  physical_memory_section: 25
+  port_io_rw: 20
+  port_io_read: 10
+
+  # Compound primitives
+  compound_god_mode: 15
+  compound_easy_target: 10
+  compound_wide_open: 10
+
+  # v4.2: vuln pattern composite
+  vuln_pattern_composite: 25
+
+  # v5: driver class ranking
+  dangerous_driver_class: 10
+
+  # HVCI
+  likely_hvci_incompatible: 5
+
+  # Communication capability
+  comms_capability: 10
+
+  # PPL killer potential
+  ppl_killer_potential: 25
+
+  # WHQL-signed / inbox penalty
+  whql_signed_inbox: -20
+
+  # v5: CVE history
+  has_prior_cves: 15
+  has_recent_cves_2yr: 10
+
+  # v4.3: research-driven additions
+  wdf_device_interface: -15
+  wdm_direct_device: 10
+  uefi_variable_access: 15
+  hardcoded_crypto_key: 10
+  hci_command_passthrough: 20
+  urb_from_user_input: 20
+  no_inputbuffer_length_check: 15
+  previousmode_relevant: 0
+
+  # v7: AwesomeMalDevLinks-inspired checks
+  # Memory corruption patterns
+  uaf_indicator: 20
+  double_free_indicator: 20
+  free_without_null: 10
+  ob_deref_heavy: 10
+
+  # Expanded BYOVD primitives
+  byovd_arb_read: 25
+  byovd_arb_write: 30
+  byovd_kernel_execute: 30
+  byovd_pid_terminate: 20
+
+  # IORING surface
+  ioring_surface: 15
+
+  # Killer driver patterns
+  killer_enum_terminate: 20
+  killer_service_control: 15
+  killer_callback_removal: 25
+  killer_minifilter_unload: 20
+  killer_edr_strings: 15
+
+  # Bloatware/OEM prioritization
+  oem_bloatware_vendor: 10
+  utility_driver_strings: 10
+  driver_age_5plus: 10
+
+  # Kernel Rhabdomancer - candidate point analysis
+  candidate_tier0_ioctl: 25
+  candidate_tier0_other: 10
+  candidate_tier1_ioctl: 8
+  candidate_no_validation: 15
+
+# --- Prefilter scoring (prefilter.py) ---
+prefilter:
+  # Per high-risk import found
+  high_risk_bonus: 1
+
+  # BYOVD candidate (opener + terminator both present)
+  byovd_candidate_bonus: 3
+
+  # PPL killer potential (ZwTerminateProcess + opener)
+  ppl_killer_bonus: 4
+
+  # Physical memory R/W (2+ indicators)
+  phys_mem_rw_bonus: 2
+
+  # Communication bridge (2+ comms imports)
+  comms_bonus: 2
+
+  # Token stealing (2+ token imports)
+  token_steal_bonus: 2
+
+  # Single process lookup
+  process_lookup_bonus: 1
+
+  # Registry manipulation (2+ registry imports)
+  registry_rw_bonus: 1
+
+  # Firmware/SPI access
+  firmware_access_bonus: 2
+
+  # Boot phase bonuses
+  boot_phase_0_bonus: 15   # BOOT_START: EDR completely blind
+  boot_phase_1_bonus: 10   # SYSTEM_START: EDR kernel loading but user-mode not ready
+  boot_log_blind_spot_bonus: 5
+
+  # --- Negative signals (good security practices) ---
+  # These REDUCE risk_hint when detected
+  probe_for_read_bonus: -2        # ProbeForRead present (proper input validation)
+  probe_for_write_bonus: -2       # ProbeForWrite present (proper input validation)
+  secure_device_creation_bonus: -3 # IoCreateDeviceSecure present (not just IoCreateDevice)
+  se_access_check_bonus: -2       # SeAccessCheck present (authorization enforcement)
+  se_privilege_check_bonus: -2    # SeSinglePrivilegeCheck present (authorization enforcement)
+  wdf_driver_create_bonus: -2     # WdfDriverCreate present (KMDF safety framework)
+  wdf_device_create_bonus: -2     # WdfDeviceCreate present (KMDF safety framework)
+  ob_ref_by_handle_tag_bonus: -1  # ObReferenceObjectByHandleWithTag (proper handle validation)

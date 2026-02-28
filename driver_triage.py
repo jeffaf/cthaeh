@@ -190,6 +190,66 @@ THRESHOLDS = {
 }
 
 
+def _load_scoring_yaml():
+    """Load scoring rules from YAML config file.
+
+    Search path mirrors investigated.json: sourceFile dir, __file__ dir, cwd,
+    then CTHAEH_SCORING_PATH env var override. Falls back to hardcoded defaults
+    if YAML is unavailable (e.g. Jython without PyYAML).
+    """
+    try:
+        import yaml
+    except ImportError:
+        return  # PyYAML not available (Jython), keep hardcoded defaults
+
+    candidates = []
+
+    # 1. Ghidra's sourceFile (Jython scripting env)
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(sourceFile.getAbsolutePath())), "scoring_rules.yaml"))
+    except:
+        pass
+
+    # 2. Python __file__
+    try:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "scoring_rules.yaml"))
+    except:
+        pass
+
+    # 3. Current working directory
+    candidates.append(os.path.join(os.getcwd(), "scoring_rules.yaml"))
+
+    # 4. Environment variable override (highest priority, inserted first)
+    env_path = os.environ.get("CTHAEH_SCORING_PATH")
+    if env_path:
+        candidates.insert(0, env_path)
+
+    for yaml_path in candidates:
+        try:
+            with open(yaml_path, "r") as f:
+                data = yaml.safe_load(f)
+            if not data:
+                continue
+
+            # Merge weights
+            yaml_weights = data.get("weights", {})
+            if yaml_weights:
+                WEIGHTS.update(yaml_weights)
+
+            # Merge thresholds
+            yaml_thresholds = data.get("thresholds", {})
+            if yaml_thresholds:
+                THRESHOLDS.update(yaml_thresholds)
+
+            print("scoring_rules.yaml loaded from: %s" % yaml_path)
+            return
+        except:
+            continue
+
+
+_load_scoring_yaml()
+
+
 def get_weight(check_id):
     """Get the weight for a check, defaulting to 0 if not in config."""
     return WEIGHTS.get(check_id, 0)
