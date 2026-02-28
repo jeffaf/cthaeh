@@ -172,6 +172,12 @@ weights:
   candidate_tier1_ioctl: 8
   candidate_no_validation: 15
 
+  # v8: Double-fetch / TOCTOU (#14)
+  double_fetch_indicator: 20
+
+  # v8: On-disk offset trust (#15)
+  ondisk_offset_trust: 15
+
 # --- Prefilter scoring (prefilter.py) ---
 prefilter:
   # Per high-risk import found

@@ -179,6 +179,12 @@ WEIGHTS = {
     "candidate_tier0_other": 10,   # Critical API outside IOCTL path
     "candidate_tier1_ioctl": 8,    # Interesting APIs in IOCTL path (3+)
     "candidate_no_validation": 15, # Dangerous API in IOCTL path without ProbeForRead/Write
+
+    # v8: Double-fetch / TOCTOU (#14)
+    "double_fetch_indicator": 20,  # User buffer pointer read multiple times without local capture
+
+    # v8: On-disk offset trust (#15)
+    "ondisk_offset_trust": 15,     # FS/minifilter uses parsed offsets without bounds checking
 }
 
 # Scoring thresholds
@@ -2751,6 +2757,258 @@ def check_candidate_points(program, imports):
     return findings
 
 
+# =============================================================================
+# v8: Double-fetch / TOCTOU detection (#14)
+# =============================================================================
+
+def check_double_fetch(program, imports):
+    """Detect double-fetch / TOCTOU patterns in IOCTL handlers (#14).
+
+    Looks for METHOD_NEITHER IOCTLs where user buffer pointers
+    (Type3InputBuffer, Irp->UserBuffer) are read multiple times
+    without being captured to a local variable first.
+
+    Heuristic: scan decompiled output (if available) or instruction
+    references for repeated accesses to user-space buffer pointers
+    in IOCTL dispatch functions.
+
+    Tagged as AP6 (Double-fetch / TOCTOU on user buffers).
+    """
+    findings = []
+
+    has_irp = "iofcompleterequest" in imports or "iocompleterequest" in imports
+    if not has_irp:
+        return findings
+
+    # User buffer pointer patterns that indicate direct user-space access
+    USER_BUFFER_PATTERNS = [
+        "type3inputbuffer",
+        "userbuffer",
+        "userinput",
+        "mdladdress",
+    ]
+
+    listing = program.getListing()
+    func_mgr = program.getFunctionManager()
+
+    double_fetch_funcs = []
+
+    for func in func_mgr.getFunctions(True):
+        func_name = func.getName().lower()
+
+        # Focus on dispatch/IOCTL handler functions
+        if not any(kw in func_name for kw in [
+            "dispatch", "ioctl", "internal", "device_control",
+            "devicecontrol", "irp", "handler",
+        ]):
+            continue
+
+        # Try decompiled output first (Ghidra's DecompInterface)
+        decomp_text = None
+        try:
+            from ghidra.app.decompiler import DecompInterface
+            decomp = DecompInterface()
+            decomp.openProgram(program)
+            result = decomp.decompileFunction(func, 30, None)
+            if result and result.decompileCompleted():
+                decomp_func = result.getDecompiledFunction()
+                if decomp_func:
+                    decomp_text = decomp_func.getC()
+            decomp.dispose()
+        except Exception:
+            decomp_text = None
+
+        if decomp_text:
+            # Check for repeated references to user buffer pointers
+            text_lower = decomp_text.lower()
+            for pattern in USER_BUFFER_PATTERNS:
+                count = text_lower.count(pattern)
+                if count >= 2:
+                    double_fetch_funcs.append({
+                        "func": func.getName(),
+                        "pattern": pattern,
+                        "count": count,
+                    })
+                    break  # One pattern match per function is enough
+        else:
+            # Fallback: instruction-level analysis
+            # Look for multiple memory loads from the same IRP offset
+            # in a single function (heuristic for repeated user buffer reads)
+            try:
+                body = func.getBody()
+                inst_iter = listing.getInstructions(body, True)
+                # Track memory operand patterns that look like IRP field accesses
+                # Typical pattern: [reg+0x18] or [reg+0x60] for UserBuffer/Type3InputBuffer
+                irp_offsets = {}  # offset -> count
+                while inst_iter.hasNext():
+                    insn = inst_iter.next()
+                    mnemonic = insn.getMnemonicString().lower()
+                    if mnemonic in ("mov", "lea"):
+                        insn_str = str(insn).lower()
+                        # Look for IRP-related field offsets:
+                        # 0x18 = Type3InputBuffer (in IO_STACK_LOCATION.Parameters)
+                        # 0x60 = Irp->UserBuffer
+                        # 0x70 = Irp->MdlAddress
+                        for offset in ["0x18", "0x60", "0x70"]:
+                            if offset in insn_str:
+                                irp_offsets[offset] = irp_offsets.get(offset, 0) + 1
+
+                for offset, count in irp_offsets.items():
+                    if count >= 3:  # Same offset read 3+ times = suspicious
+                        double_fetch_funcs.append({
+                            "func": func.getName(),
+                            "pattern": "IRP offset %s" % offset,
+                            "count": count,
+                        })
+                        break
+            except Exception:
+                pass
+
+    if double_fetch_funcs:
+        details = ["%s (%s x%d)" % (df["func"], df["pattern"], df["count"])
+                   for df in double_fetch_funcs[:5]]
+        findings.append({
+            "check": "double_fetch_indicator",
+            "detail": "Potential double-fetch/TOCTOU: user buffer read multiple times in: %s" % "; ".join(details),
+            "score": get_weight("double_fetch_indicator"),
+        })
+
+    return findings
+
+
+# =============================================================================
+# v8: On-disk offset trust detection (#15)
+# =============================================================================
+
+def check_ondisk_offset_trust(program, imports, driver_class_info):
+    """Detect on-disk offset trust patterns in filesystem/minifilter drivers (#15).
+
+    For drivers classified as minifilter or filesystem framework, check if they
+    use offset/index values from parsed structures as array indices without
+    bounds checking.
+
+    Only applies to minifilter/FS framework drivers (uses framework detection
+    from classify_driver_class).
+
+    Tagged as AP3 (Trusting on-disk/file-embedded offsets).
+    """
+    findings = []
+
+    # Only apply to minifilter/FS framework drivers
+    category = driver_class_info.get("category", "").lower()
+    driver_cls = driver_class_info.get("class", "").upper()
+
+    is_fs_driver = any(kw in category for kw in [
+        "file system", "minifilter", "filter",
+    ])
+
+    # Also check import-based detection
+    has_flt = "fltregisterfilter" in imports
+    has_fs_imports = any(f in imports for f in [
+        "fltregisterfilter", "fsrtlregisterfilesystemfiltercallbacks",
+        "ioregisterfilesystem",
+    ])
+
+    if not is_fs_driver and not has_flt and not has_fs_imports:
+        return findings
+
+    # Look for patterns in decompiled code: pointer arithmetic using fields
+    # from file-backed structures without bounds checking
+    listing = program.getListing()
+    func_mgr = program.getFunctionManager()
+
+    suspect_funcs = []
+
+    for func in func_mgr.getFunctions(True):
+        try:
+            if func.isThunk():
+                continue
+            body = func.getBody()
+            if body.getNumAddresses() < 16:
+                continue
+        except Exception:
+            continue
+
+        # Try decompiled output
+        decomp_text = None
+        try:
+            from ghidra.app.decompiler import DecompInterface
+            decomp = DecompInterface()
+            decomp.openProgram(program)
+            result = decomp.decompileFunction(func, 30, None)
+            if result and result.decompileCompleted():
+                decomp_func = result.getDecompiledFunction()
+                if decomp_func:
+                    decomp_text = decomp_func.getC()
+            decomp.dispose()
+        except Exception:
+            decomp_text = None
+
+        if decomp_text:
+            text_lower = decomp_text.lower()
+            # Look for struct field read -> use as index without bounds check
+            # Patterns: *(ptr + offset), ptr[field], cast + offset arithmetic
+            has_offset_use = False
+            has_bounds_check = False
+
+            # Offset/index usage indicators
+            offset_indicators = [
+                "offset", "index", "length", "size", "count",
+                "numbytes", "byteoffset", "fileoffset",
+            ]
+            for indicator in offset_indicators:
+                if indicator in text_lower:
+                    has_offset_use = True
+                    break
+
+            # Bounds check indicators
+            bounds_indicators = [
+                " > ", " < ", " >= ", " <= ",
+                "if (", "min(", "max(",
+                "assert", "validate", "check",
+            ]
+            for indicator in bounds_indicators:
+                if indicator in text_lower:
+                    has_bounds_check = True
+                    break
+
+            # Flag: has offset usage but no bounds checking
+            if has_offset_use and not has_bounds_check:
+                suspect_funcs.append(func.getName())
+        else:
+            # Fallback: instruction-level analysis
+            # Look for memory loads followed by use as index without CMP
+            try:
+                body = func.getBody()
+                inst_iter = listing.getInstructions(body, True)
+                load_count = 0
+                cmp_count = 0
+                while inst_iter.hasNext():
+                    insn = inst_iter.next()
+                    mnemonic = insn.getMnemonicString().lower()
+                    if mnemonic in ("mov", "movzx", "movsx"):
+                        load_count += 1
+                    elif mnemonic in ("cmp", "test"):
+                        cmp_count += 1
+
+                # Heuristic: many loads with very few comparisons = no bounds checking
+                if load_count > 20 and cmp_count < 3:
+                    suspect_funcs.append(func.getName())
+            except Exception:
+                pass
+
+    if suspect_funcs:
+        detail = "FS/minifilter driver uses parsed offsets without apparent bounds checking in: %s" % (
+            ", ".join(suspect_funcs[:5]))
+        findings.append({
+            "check": "ondisk_offset_trust",
+            "detail": detail,
+            "score": get_weight("ondisk_offset_trust"),
+        })
+
+    return findings
+
+
 def get_driver_info(program):
     """Extract basic driver metadata including parsed version info."""
     info = {
@@ -2901,6 +3159,15 @@ def run():
     all_findings.extend(check_bloatware_oem(strings, driver_name))
     # v7.1: Kernel Rhabdomancer - candidate point analysis (call graph + per-function API mapping)
     all_findings.extend(check_candidate_points(program, imports))
+    # v8: Double-fetch / TOCTOU detection (#14)
+    all_findings.extend(check_double_fetch(program, imports))
+    # v8: On-disk offset trust detection (#15) - needs driver class info from prior checks
+    _dc_info = {"class": "UNKNOWN", "category": "Unclassified"}
+    for _f in all_findings:
+        if "driver_class" in _f:
+            _dc_info = {"class": _f["driver_class"], "category": _f.get("driver_category", "")}
+            break
+    all_findings.extend(check_ondisk_offset_trust(program, imports, _dc_info))
     # v5: CVE history check
     cve_findings, matched_cves = check_cve_history(driver_name)
     all_findings.extend(cve_findings)
