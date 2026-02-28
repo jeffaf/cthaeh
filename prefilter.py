@@ -428,7 +428,8 @@ def classify_driver_class(imports, import_dlls=None):
     """Classify driver by type based on imports and DLLs.
 
     Returns dict with 'class' (CRITICAL/HIGH/MEDIUM/LOW/UNKNOWN),
-    'category' description, and 'exploitability' notes.
+    'category' description, 'exploitability' notes, and 'framework'
+    identifying the specific driver technology used.
     """
     if import_dlls is None:
         import_dlls = set()
@@ -438,27 +439,52 @@ def classify_driver_class(imports, import_dlls=None):
     has_wdfdrivercreate = "WdfDriverCreate" in imports or "wdfdrivercreate" in import_names_lower
     has_fltregisterfilter = "FltRegisterFilter" in imports or "fltregisterfilter" in import_names_lower
 
-    # CRITICAL: Raw WDM without WDF safety, or FS filter
+    # --- Framework detection (most specific first) ---
+
+    # minifilter: FltRegisterFilter
     if has_fltregisterfilter:
         return {
             "class": "CRITICAL",
             "category": "File system filter",
             "exploitability": "FS filters intercept all file I/O; bugs = system-wide impact",
-        }
-    if has_iocreatedevice and not has_wdfdrivercreate:
-        return {
-            "class": "CRITICAL",
-            "category": "Raw WDM driver",
-            "exploitability": "No WDF safety rails; manual IRP handling prone to bugs",
+            "framework": "minifilter",
         }
 
-    # HIGH: NDIS, Bluetooth, USB function drivers
-    ndis_imports = {"NdisRegisterProtocolDriver", "NdisMRegisterMiniportDriver"}
-    if imports & ndis_imports:
+    # wfp_callout: FwpsCalloutRegister0/1/2/3
+    wfp_imports = {"FwpsCalloutRegister0", "FwpsCalloutRegister1", "FwpsCalloutRegister2", "FwpsCalloutRegister3"}
+    if imports & wfp_imports or import_names_lower & {i.lower() for i in wfp_imports}:
         return {
             "class": "HIGH",
-            "category": "NDIS network driver",
+            "category": "WFP callout driver",
+            "exploitability": "Network packet inspection in kernel; complex parsing surface",
+            "framework": "wfp_callout",
+        }
+
+    # ndis_miniport: NdisMRegisterMiniportDriver
+    if "NdisMRegisterMiniportDriver" in imports or "ndismregisterminiportdriver" in import_names_lower:
+        return {
+            "class": "HIGH",
+            "category": "NDIS miniport driver",
             "exploitability": "Network packet parsing in kernel; remote attack surface",
+            "framework": "ndis_miniport",
+        }
+
+    # ndis_filter: NdisFRegisterFilterDriver
+    if "NdisFRegisterFilterDriver" in imports or "ndisfregisterfilterdriver" in import_names_lower:
+        return {
+            "class": "HIGH",
+            "category": "NDIS filter driver",
+            "exploitability": "Network packet interception in kernel; remote attack surface",
+            "framework": "ndis_filter",
+        }
+
+    # ndis_protocol: NdisRegisterProtocolDriver
+    if "NdisRegisterProtocolDriver" in imports or "ndisregisterprotocoldriver" in import_names_lower:
+        return {
+            "class": "HIGH",
+            "category": "NDIS protocol driver",
+            "exploitability": "Raw network protocol handling in kernel; remote attack surface",
+            "framework": "ndis_protocol",
         }
 
     bt_dlls = {"bthport.sys", "bthhfp.sys"}
@@ -467,6 +493,7 @@ def classify_driver_class(imports, import_dlls=None):
             "class": "HIGH",
             "category": "Bluetooth driver",
             "exploitability": "BT stack in kernel; proximity-based attack surface",
+            "framework": "bluetooth",
         }
 
     usb_imports = {"USBD_CreateConfigurationRequestEx", "WdfUsbTargetDeviceSendControlTransferSynchronously"}
@@ -475,14 +502,44 @@ def classify_driver_class(imports, import_dlls=None):
             "class": "HIGH",
             "category": "USB function driver",
             "exploitability": "USB request handling in kernel; physical/logical attack surface",
+            "framework": "usb_function",
         }
 
-    # MEDIUM: WDF/KMDF, display
+    # storport: StorPortInitialize
+    if "StorPortInitialize" in imports or "storportinitialize" in import_names_lower:
+        return {
+            "class": "MEDIUM",
+            "category": "StorPort miniport driver",
+            "exploitability": "Storage stack driver; data corruption risk on bugs",
+            "framework": "storport",
+        }
+
+    # class_video: VideoPortInitialize
+    if "VideoPortInitialize" in imports or "videoportinitialize" in import_names_lower:
+        return {
+            "class": "MEDIUM",
+            "category": "Video miniport driver",
+            "exploitability": "Legacy video port driver; limited modern attack surface",
+            "framework": "class_video",
+        }
+
+    # ks_minidriver: KsCreateFilterFactory or KsInitializeDriver
+    if "KsCreateFilterFactory" in imports or "kscreatefilterfactory" in import_names_lower or \
+       "KsInitializeDriver" in imports or "ksinitializedriver" in import_names_lower:
+        return {
+            "class": "MEDIUM",
+            "category": "KS minidriver",
+            "exploitability": "Kernel streaming driver; media processing surface",
+            "framework": "ks_minidriver",
+        }
+
+    # kmdf: WdfDriverCreate (check before wdm_raw since it has IoCreateDevice sometimes too)
     if has_wdfdrivercreate:
         return {
             "class": "MEDIUM",
             "category": "WDF/KMDF driver",
             "exploitability": "WDF provides safety rails but bugs still possible",
+            "framework": "kmdf",
         }
 
     if "DxgkInitialize" in imports or "dxgkinitialize" in import_names_lower:
@@ -490,15 +547,17 @@ def classify_driver_class(imports, import_dlls=None):
             "class": "MEDIUM",
             "category": "Display/GPU driver",
             "exploitability": "Complex IOCTL surface but often well-audited",
+            "framework": "display_miniport",
         }
 
-    # LOW: HID, printer, audio
+    # portclass_audio: PcRegisterSubdevice or PortClsCreate
     if "PortClsCreate" in imports or "portclscreate" in import_names_lower or \
        "PcRegisterSubdevice" in imports or "pcregistersubdevice" in import_names_lower:
         return {
             "class": "LOW",
             "category": "Audio (PortCls) driver",
             "exploitability": "Minimal direct user IOCTL surface",
+            "framework": "portclass_audio",
         }
 
     hid_imports = {"HidRegisterMinidriver", "hidregisterminidriver"}
@@ -507,6 +566,7 @@ def classify_driver_class(imports, import_dlls=None):
             "class": "LOW",
             "category": "HID minidriver",
             "exploitability": "Limited attack surface through HID stack",
+            "framework": "hid_minidriver",
         }
 
     printer_dlls = {"pjlmon.dll", "tcpmon.dll", "usbmon.dll"}
@@ -515,12 +575,23 @@ def classify_driver_class(imports, import_dlls=None):
             "class": "LOW",
             "category": "Printer driver",
             "exploitability": "Typically sandboxed print pipeline",
+            "framework": "printer",
+        }
+
+    # wdm_raw: IoCreateDevice without any framework
+    if has_iocreatedevice:
+        return {
+            "class": "CRITICAL",
+            "category": "Raw WDM driver",
+            "exploitability": "No WDF safety rails; manual IRP handling prone to bugs",
+            "framework": "wdm_raw",
         }
 
     return {
         "class": "UNKNOWN",
         "category": "Unclassified",
         "exploitability": "Manual review needed",
+        "framework": None,
     }
 
 
@@ -618,6 +689,8 @@ def check_driver(driver_path, max_size=MAX_SIZE_BYTES, lol_hashes=None, lol_name
         flags.append(f"SIGNER:{signer}")
     if driver_class and driver_class["class"] != "UNKNOWN":
         flags.append(f"CLASS:{driver_class['class']}:{driver_class['category']}")
+    if driver_class and driver_class.get("framework"):
+        flags.append(f"FRAMEWORK:{driver_class['framework']}")
 
     # Must have at least one interesting import
     has_interesting = bool(imports & INTERESTING_IMPORTS)
