@@ -41,7 +41,7 @@ python run_triage.py --explain example.sys
 
 ## Scoring
 
-All weights are configurable via the `WEIGHTS` dict at the top of `driver_triage.py`.
+All weights live in `scoring_rules.yaml`. Both `driver_triage.py` (Ghidra/Jython) and `prefilter.py` load from it. Missing file? They fall back to hardcoded defaults.
 
 ### Check Categories
 
@@ -68,6 +68,9 @@ All weights are configurable via the `WEIGHTS` dict at the top of `driver_triage
 | **IORING surface** | IORING APIs, shared memory section patterns | Novel kernel attack surface detection |
 | **Killer driver** | Process enum+kill, callback removal, minifilter unload, EDR product strings | EDR/AV termination pattern detection |
 | **Bloatware/OEM** | Consumer OEM vendor boost, utility driver strings, PE age | Prioritizes historically weak vendors |
+| **Double-fetch / TOCTOU** | User buffer pointer read multiple times without local capture | Race condition patterns in IOCTL handlers |
+| **On-disk offset trust** | Parsed offsets used without bounds checking in FS/minifilter drivers | Trusted offset → OOB read/write |
+| **Framework detection** | WDF vs WDM detection, auto-adjusts scoring | WDF drivers get less noise, WDM gets more scrutiny |
 
 ### Priority Tiers
 
@@ -93,6 +96,31 @@ Drivers you've already analyzed go in `investigated.json`:
 ```
 
 These are skipped on future scans, labeled `INVESTIGATED` in output.
+
+### Anti-Pattern Tags
+
+Findings are tagged with KernelSight anti-patterns (AP1-AP6) when they match known vulnerability patterns:
+
+| Tag | Pattern | CVE frequency |
+|-----|---------|---------------|
+| AP1 | Trusting user-supplied lengths | ~60% of driver CVEs |
+| AP2 | Missing synchronization on shared state | ~14% |
+| AP3 | Trusting on-disk/file-embedded offsets | FS/minifilter bugs |
+| AP4 | Exposing physical memory or MSR access | God-mode primitives |
+| AP5 | No IOCTL auth / open device ACLs | Easy targets |
+| AP6 | Double-fetch / TOCTOU on user buffers | Race conditions |
+
+Reports show which anti-patterns each driver triggers, so you know *what class* of bug to look for.
+
+### Data Type Archive
+
+Cthaeh can auto-load the [Cisco Talos Windows Driver DTA](https://github.com/Cisco-Talos/Windows-drivers-GDT-file) during analysis. This gives Ghidra proper type definitions for 45+ Windows kernel functions that it doesn't know natively.
+
+```bash
+python download_dta.py   # fetches .gdt to data/
+```
+
+When `data/windows_driver_types.gdt` exists, Ghidra automatically applies it as a pre-script before each analysis run. No flags needed.
 
 ## Output
 
@@ -137,6 +165,9 @@ The top scorer is auto-explained after every scan.
 | `run_triage.py` | Orchestrator (parallel, prefilter, explain, smart defaults) |
 | `prefilter.py` | Fast PE import pre-filter |
 | `extract_driverstore.py` | Extracts third-party .sys from Windows DriverStore |
+| `scoring_rules.yaml` | All scoring weights and thresholds in one place |
+| `apply_dta.py` | Ghidra pre-script: loads Talos DTA for kernel types |
+| `download_dta.py` | Downloads the Talos .gdt file to `data/` |
 | `investigated.json` | Drivers already analyzed (skipped on scan) |
 | `policies/` | WDAC block policy JSONs and HolyGrail LOLDrivers data |
 | `test_regression.py` | Regression tests against known ground-truth samples |
@@ -155,6 +186,7 @@ python run_triage.py C:\drivers --no-json --no-report  # CSV only
 **Environment variables:**
 - `GHIDRA_HOME` - Path to Ghidra installation (auto-detected if not set)
 - `CTHAEH_FP_PATH` - Override path to investigated.json
+- `CTHAEH_DTA_PATH` - Override path to .gdt data type archive
 
 ## Performance
 
@@ -183,6 +215,7 @@ DriverStore --> extract --> Cthaeh triage --> ranked list --> manual audit
 
 - WDAC block policy checking and LOLDrivers cross-reference inspired by [HolyGrail](https://github.com/BlackSnufkin/Holygrail) by BlackSnufkin.
 - Kernel Rhabdomancer candidate point strategy inspired by [Rhabdomancer.java](https://github.com/0xdea/ghidra-scripts/blob/main/Rhabdomancer.java) by Marco Ivaldi (0xdea). See also: [Automating binary vulnerability discovery with Ghidra and Semgrep](https://hnsecurity.it/blog/automating-binary-vulnerability-discovery-with-ghidra-and-semgrep/).
+- Windows driver data type archive from [Cisco Talos](https://github.com/Cisco-Talos/Windows-drivers-GDT-file). Blog post: [Ghidra data type archive for Windows drivers](https://blog.talosintelligence.com/ghidra-data-type-archive-for-windows-drivers/).
 
 ## License
 
