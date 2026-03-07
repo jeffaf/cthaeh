@@ -91,11 +91,12 @@ DriverStore --> extract --> running-only --> pre-filter --> Cthaeh --> ranked li
 
 ## Acknowledgments
 
-- [HolyGrail](https://github.com/BlackSnufkin/Holygrail) (BlackSnufkin) — WDAC + LOLDrivers
-- [Rhabdomancer](https://github.com/0xdea/ghidra-scripts/blob/main/Rhabdomancer.java) (0xdea) — candidate point strategy
-- [KernelSight](https://splintersfury.github.io/KernelSight/guides/secure-driver-anatomy/) — anti-pattern taxonomy (134 CVEs)
-- [DriverAtlas](https://github.com/splintersfury/DriverAtlas) (splintersfury) — framework detection
-- [Cisco Talos](https://github.com/Cisco-Talos/Windows-drivers-GDT-file) — Windows driver data type archive
+- WDAC block policy checking and LOLDrivers cross-reference inspired by [HolyGrail](https://github.com/BlackSnufkin/Holygrail) by BlackSnufkin.
+- Kernel Rhabdomancer candidate point strategy inspired by [Rhabdomancer.java](https://github.com/0xdea/ghidra-scripts/blob/main/Rhabdomancer.java) by Marco Ivaldi (0xdea). See also: [Automating binary vulnerability discovery with Ghidra and Semgrep](https://hnsecurity.it/blog/automating-binary-vulnerability-discovery-with-ghidra-and-semgrep/).
+- Anti-pattern tagging (AP1-AP6) based on [KernelSight](https://splintersfury.github.io/KernelSight/guides/secure-driver-anatomy/) vulnerability root cause analysis across 134 CVEs.
+- Framework detection and YAML scoring inspired by [DriverAtlas](https://github.com/splintersfury/DriverAtlas) by splintersfury.
+- Ghidra Data Type Archive for Windows drivers by [Talos Intelligence](https://blog.talosintelligence.com/ghidra-data-type-archive-for-windows-drivers/).
+- Windows driver data type archive from [Cisco Talos](https://github.com/Cisco-Talos/Windows-drivers-GDT-file). Blog post: [Ghidra data type archive for Windows drivers](https://blog.talosintelligence.com/ghidra-data-type-archive-for-windows-drivers/).
 
 ## License
 
