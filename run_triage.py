@@ -30,43 +30,14 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-try:
-    import yaml
-except ImportError:
-    yaml = None
 
-
-def _load_thresholds():
-    """Load scoring thresholds from scoring_rules.yaml (single source of truth).
-    Falls back to hardcoded defaults if YAML unavailable."""
-    defaults = {"CRITICAL": 250, "HIGH": 150, "MEDIUM": 75, "LOW": 30}
-    if yaml is None:
-        return defaults
-    # Search: same dir as this script, then cwd
-    candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "scoring_rules.yaml"),
-        os.path.join(os.getcwd(), "scoring_rules.yaml"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                with open(path, "r") as f:
-                    data = yaml.safe_load(f)
-                thresholds = data.get("thresholds", {})
-                if thresholds:
-                    return {
-                        "CRITICAL": thresholds.get("CRITICAL", defaults["CRITICAL"]),
-                        "HIGH": thresholds.get("HIGH", defaults["HIGH"]),
-                        "MEDIUM": thresholds.get("MEDIUM", defaults["MEDIUM"]),
-                        "LOW": thresholds.get("LOW", defaults["LOW"]),
-                    }
-            except Exception:
-                pass
-    return defaults
-
-
-# --- Scoring tier thresholds (loaded from scoring_rules.yaml) ---
-SCORE_TIERS = _load_thresholds()
+# --- Scoring tier thresholds (used for report recommendations) ---
+SCORE_TIERS = {
+    "CRITICAL": 120,
+    "HIGH": 85,
+    "MEDIUM": 55,
+    "LOW": 30,
+}
 
 
 def get_score_tier(score):
@@ -264,10 +235,10 @@ def run_ghidra_analysis(args_tuple):
     os.makedirs(project_dir, exist_ok=True)
     
     if sys.platform == "win32":
-        headless = os.path.join(ghidra_path, "support", "analyzeHeadless.bat")
+        headless = os.path.join(ghidra_path, "support", "pyghidraRun.bat")
     else:
-        headless = os.path.join(ghidra_path, "support", "analyzeHeadless")
-    
+        headless = os.path.join(ghidra_path, "support", "pyghidraRun")
+
     if not os.path.exists(headless):
         return None, f"Ghidra headless not found at {headless}"
     
@@ -276,6 +247,7 @@ def run_ghidra_analysis(args_tuple):
 
     cmd = [
         headless,
+        "--headless",
         project_dir,
         f"triage_{driver_name}",
         "-import", driver_path,
@@ -314,26 +286,13 @@ def run_ghidra_analysis(args_tuple):
         return None, str(e)
 
 
-def run_prefilter(drivers_dir, max_size_mb=5, min_risk_hint=0):
-    """Run the pefile pre-filter to eliminate uninteresting drivers.
-    
-    Args:
-        min_risk_hint: Minimum prefilter risk_hint score to send to Ghidra.
-            0 = send everything with attack surface (default, backward compat).
-            1+ = skip low-potential drivers before Ghidra (saves time).
-    """
+def run_prefilter(drivers_dir, max_size_mb=5):
+    """Run the pefile pre-filter to eliminate uninteresting drivers."""
     try:
         from prefilter import prefilter_directory
         max_bytes = max_size_mb * 1024 * 1024
         results = prefilter_directory(drivers_dir, max_bytes, check_loldrivers=True)
-        analyze = results["analyze"]
-        if min_risk_hint > 0:
-            before = len(analyze)
-            analyze = [d for d in analyze if d.get("risk_hint", 0) >= min_risk_hint]
-            skipped = before - len(analyze)
-            if skipped:
-                print(f"  Pre-filter: {skipped} drivers below risk_hint {min_risk_hint} (skipped before Ghidra)")
-        return [d["path"] for d in analyze]
+        return [d["path"] for d in results["analyze"]]
     except ImportError:
         print("WARNING: prefilter.py not found or pefile not installed.")
         print("  Install: pip install pefile")
@@ -385,11 +344,8 @@ def write_csv(results, output_path):
     print(f"\nResults written to: {output_path}")
 
 
-def print_summary(results, min_tier="HIGH"):
+def print_summary(results):
     """Print a quick summary to terminal."""
-    tier_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "SKIP"]
-    min_tier_idx = tier_order.index(min_tier) if min_tier in tier_order else 1
-
     total = len(results)
     critical = sum(1 for r in results if r.get("priority") == "CRITICAL")
     high = sum(1 for r in results if r.get("priority") == "HIGH")
@@ -408,18 +364,13 @@ def print_summary(results, min_tier="HIGH"):
     print()
     
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    # Filter to min_tier and above
-    filtered = [r for r in results
-                if r.get("priority", "SKIP") in tier_order[:min_tier_idx + 1]]
-    if filtered:
-        tier_label = f" (>= {min_tier})" if min_tier != "SKIP" else ""
-        print(f"Top targets{tier_label}:")
-        print()
-        for i, r in enumerate(filtered[:20], 1):
+    if results:
+        print("Top targets:")
+        for i, r in enumerate(results[:20], 1):
             driver = r.get("driver", {})
-            print(f"  {i:2d}. [{r.get('priority', '?'):8s}] {r.get('score', 0):3d} pts  {driver.get('name', '?')}")
-    elif results:
-        print(f"No drivers at {min_tier} tier or above. Use --min-tier MEDIUM to see more.")
+            dc = r.get("driver_class", {})
+            cls_tag = f" [{dc['class']}]" if dc and dc.get("class", "UNKNOWN") != "UNKNOWN" else ""
+            print(f"  {i:2d}. [{r.get('priority', '?'):6s}] {r.get('score', 0):3d} pts  {driver.get('name', '?')}{cls_tag}")
 
 
 def run_analysis(drivers, ghidra_path, script_path, project_dir, workers=1, json_output=None):
@@ -792,13 +743,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="🌳 Cthaeh - Driver vulnerability triage scanner",
         epilog="""Examples:
-  python run_triage.py C:\\drivers                      # Scan with smart defaults (shows HIGH+ only)
-  python run_triage.py C:\\drivers --prefilter-min 3    # Aggressive filter (fewer drivers to Ghidra)
-  python run_triage.py C:\\drivers --prefilter-min 0    # Analyze everything with attack surface
-  python run_triage.py C:\\drivers --min-tier CRITICAL  # Only show CRITICAL in top targets
-  python run_triage.py C:\\drivers --no-prefilter       # Skip pre-filter entirely
+  python run_triage.py C:\\drivers                    # Scan with smart defaults
+  python run_triage.py C:\\drivers --no-prefilter     # Skip pre-filter
   python run_triage.py --single C:\\path\\to\\driver.sys
-  python run_triage.py --explain amdfendr.sys         # Explain existing results
+  python run_triage.py --explain amdfendr.sys        # Explain existing results
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -814,9 +762,6 @@ def main():
                         help="Parallel Ghidra instances (default: auto = half CPUs)")
     parser.add_argument("--no-prefilter", action="store_true",
                         help="Disable pefile pre-filter (on by default)")
-    parser.add_argument("--prefilter-min", type=int, default=1,
-                        help="Minimum prefilter risk_hint to send to Ghidra (default: 1). "
-                             "Higher = fewer drivers analyzed = faster scan. 0 = analyze everything with attack surface.")
     parser.add_argument("--max-size", type=int, default=5,
                         help="Max driver size in MB for pre-filter (default: 5)")
     parser.add_argument("--no-json", action="store_true",
@@ -827,9 +772,6 @@ def main():
     parser.add_argument("--report", help="Markdown report path (default: triage_report.md)")
     parser.add_argument("--report-top", type=int, default=20,
                         help="Number of top drivers to include in report (default: 20)")
-    parser.add_argument("--min-tier", default="HIGH",
-                        choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "SKIP"],
-                        help="Minimum tier to show in Top targets display (default: HIGH). Counts/report/JSON still include all.")
     parser.add_argument("--explain", help="Show detailed scoring breakdown for a specific driver (by name)")
     parser.add_argument("--hw-check", action="store_true",
                         help="Check hardware presence after triage (Windows only)")
@@ -879,12 +821,12 @@ def main():
     
     # Validate Ghidra path
     if sys.platform == "win32":
-        headless = os.path.join(ghidra_path, "support", "analyzeHeadless.bat")
+        headless = os.path.join(ghidra_path, "support", "pyghidraRun.bat")
     else:
-        headless = os.path.join(ghidra_path, "support", "analyzeHeadless")
-    
+        headless = os.path.join(ghidra_path, "support", "pyghidraRun")
+
     if not os.path.exists(headless):
-        parser.error(f"Invalid Ghidra path: {ghidra_path} (no analyzeHeadless found in support/)")
+        parser.error(f"Invalid Ghidra path: {ghidra_path} (no pyghidraRun found in support/)")
     
     # Auto-detect worker count
     workers = args.workers if args.workers > 0 else detect_cpu_count()
@@ -909,7 +851,7 @@ def main():
     else:
         if use_prefilter:
             print(f"Running pre-filter on {drivers_dir}...")
-            filtered = run_prefilter(drivers_dir, args.max_size, min_risk_hint=args.prefilter_min)
+            filtered = run_prefilter(drivers_dir, args.max_size)
             if filtered is not None:
                 drivers = filtered
             else:
@@ -986,7 +928,7 @@ def main():
 
         if report_output:
             write_report(results, report_output, args.report_top)
-        print_summary(results, min_tier=args.min_tier)
+        print_summary(results)
 
     if results:
         if args.explain:

@@ -15,7 +15,6 @@ import os
 
 # Ghidra imports (available in Ghidra scripting environment)
 from ghidra.program.model.symbol import SourceType
-from ghidra.program.util import DefinedDataIterator
 
 
 # --- Scoring Weights Configuration ---
@@ -472,13 +471,19 @@ def get_import_dlls(program):
     return dlls
 
 
+_STRING_MNEMONICS = {"ds", "unicode", "p_unicode", "p_string", "p_string255", "mbcs"}
+
 def get_strings(program):
     """Get all defined strings in the binary."""
     strings = []
-    for data in DefinedDataIterator.definedStrings(program):
-        val = data.getDefaultValueRepresentation()
-        if val:
-            strings.append(val.strip('"').strip("'"))
+    listing = program.getListing()
+    data_iter = listing.getDefinedData(program.getMinAddress(), True)
+    while data_iter.hasNext():
+        data = data_iter.next()
+        if data.getMnemonicString() in _STRING_MNEMONICS:
+            val = data.getDefaultValueRepresentation()
+            if val:
+                strings.append(val.strip('"').strip("'"))
     return strings
 
 
@@ -3202,24 +3207,7 @@ def run():
     driver_name = driver_info.get("name", "")
     
     # Check known FP / already-investigated list
-    # Supports both old format ("driver.sys": "reason string")
-    # and new format ("driver.sys": {"reason": "...", "version": "1.2.3"})
-    skip_entry = INVESTIGATED.get(driver_name)
-    skip_reason = None
-    if skip_entry:
-        if isinstance(skip_entry, str):
-            # Old format: always skip
-            skip_reason = skip_entry
-        elif isinstance(skip_entry, dict):
-            entry_version = skip_entry.get("version")
-            driver_version = driver_info.get("version", "")
-            if entry_version and driver_version and entry_version != driver_version:
-                # Version mismatch: driver was updated, re-scan it
-                skip_reason = None
-                print("investigated.json: %s version changed (%s -> %s), re-scanning" % (
-                    driver_name, entry_version, driver_version))
-            else:
-                skip_reason = skip_entry.get("reason", "investigated")
+    skip_reason = INVESTIGATED.get(driver_name)
     if skip_reason:
         result = {
             "driver": driver_info,
