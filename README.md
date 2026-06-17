@@ -101,6 +101,7 @@ DriverStore --> extract --> running-only --> pre-filter --> Cthaeh --> ranked li
 
 - Python 3.8+ with `pefile`, `pyyaml`
 - Ghidra 10.x+ (headless mode)
+- Ghidra 12.x: run `support/pyghidraRun` once if prompted so PyGhidra is installed
 - Windows for DriverStore extraction (analysis works on any OS)
 
 See [REFERENCE.md](REFERENCE.md) for the full technical reference (all 97 heuristics, CLI flags, anti-pattern tags).

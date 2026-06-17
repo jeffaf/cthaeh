@@ -251,9 +251,29 @@ def find_sys_files(directory):
     return sys_files
 
 
+def get_ghidra_headless_launcher(ghidra_path):
+    """Return the best available Ghidra headless launcher and extra args."""
+    if sys.platform == "win32":
+        candidates = [
+            ("pyghidraRun", os.path.join(ghidra_path, "support", "pyghidraRun.bat"), ["--headless"]),
+            ("analyzeHeadless", os.path.join(ghidra_path, "support", "analyzeHeadless.bat"), []),
+        ]
+    else:
+        candidates = [
+            ("pyghidraRun", os.path.join(ghidra_path, "support", "pyghidraRun"), ["--headless"]),
+            ("analyzeHeadless", os.path.join(ghidra_path, "support", "analyzeHeadless"), []),
+        ]
+
+    for name, path, extra_args in candidates:
+        if os.path.exists(path):
+            return path, extra_args, name
+
+    return None, [], None
+
+
 def run_ghidra_analysis(args_tuple):
     """Run Ghidra headless analysis on a single driver.
-    
+
     Takes a tuple for ProcessPoolExecutor compatibility:
     (ghidra_path, driver_path, script_path, project_dir, worker_id)
     """
@@ -262,20 +282,17 @@ def run_ghidra_analysis(args_tuple):
     # Each worker gets its own project directory to avoid conflicts
     project_dir = os.path.join(project_base, f"worker_{worker_id}")
     os.makedirs(project_dir, exist_ok=True)
-    
-    if sys.platform == "win32":
-        headless = os.path.join(ghidra_path, "support", "analyzeHeadless.bat")
-    else:
-        headless = os.path.join(ghidra_path, "support", "analyzeHeadless")
-    
-    if not os.path.exists(headless):
-        return None, f"Ghidra headless not found at {headless}"
-    
+
+    headless, headless_args, _ = get_ghidra_headless_launcher(ghidra_path)
+    if not headless:
+        return None, f"Ghidra headless not found in {os.path.join(ghidra_path, 'support')}"
+
     driver_name = Path(driver_path).stem
     script_dir = os.path.dirname(script_path)
 
     cmd = [
         headless,
+        *headless_args,
         project_dir,
         f"triage_{driver_name}",
         "-import", driver_path,
@@ -876,16 +893,12 @@ def main():
     ghidra_path = args.ghidra or detect_ghidra()
     if not ghidra_path:
         parser.error("Could not find Ghidra. Set GHIDRA_HOME env var or use --ghidra")
-    
+
     # Validate Ghidra path
-    if sys.platform == "win32":
-        headless = os.path.join(ghidra_path, "support", "analyzeHeadless.bat")
-    else:
-        headless = os.path.join(ghidra_path, "support", "analyzeHeadless")
-    
-    if not os.path.exists(headless):
-        parser.error(f"Invalid Ghidra path: {ghidra_path} (no analyzeHeadless found in support/)")
-    
+    headless, _, headless_name = get_ghidra_headless_launcher(ghidra_path)
+    if not headless:
+        parser.error(f"Invalid Ghidra path: {ghidra_path} (no pyghidraRun or analyzeHeadless found in support/)")
+
     # Auto-detect worker count
     workers = args.workers if args.workers > 0 else detect_cpu_count()
     
@@ -898,7 +911,7 @@ def main():
         print(f"ERROR: Triage script not found at {script_path}")
         sys.exit(1)
     
-    print(f"Ghidra: {ghidra_path}")
+    print(f"Ghidra: {ghidra_path} ({headless_name})")
     print(f"Workers: {workers}")
     print(f"Pre-filter: {'on' if use_prefilter else 'off'}")
     print()

@@ -1,5 +1,5 @@
 # driver_triage.py - Ghidra Headless Script for Cthaeh Driver Triage
-# Run via: analyzeHeadless.bat <proj> <name> -import <driver.sys> -postScript driver_triage.py
+# Run via: pyghidraRun --headless or analyzeHeadless with -postScript driver_triage.py
 #
 # Scores Windows kernel drivers on vulnerability indicators.
 # Output: prints JSON summary to stdout (captured by orchestrator).
@@ -16,6 +16,10 @@ import os
 # Ghidra imports (available in Ghidra scripting environment)
 from ghidra.program.model.symbol import SourceType
 from ghidra.program.util import DefinedDataIterator
+try:
+    from ghidra.program.util import DefinedStringIterator
+except ImportError:
+    DefinedStringIterator = None
 
 
 # --- Scoring Weights Configuration ---
@@ -475,7 +479,13 @@ def get_import_dlls(program):
 def get_strings(program):
     """Get all defined strings in the binary."""
     strings = []
-    for data in DefinedDataIterator.definedStrings(program):
+    if DefinedStringIterator is not None:
+        data_iter = DefinedStringIterator.forProgram(program)
+    else:
+        data_iter = DefinedDataIterator.definedStrings(program)
+
+    while data_iter.hasNext():
+        data = data_iter.next()
         val = data.getDefaultValueRepresentation()
         if val:
             strings.append(val.strip('"').strip("'"))
