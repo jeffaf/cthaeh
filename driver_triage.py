@@ -333,26 +333,38 @@ def _load_scoring_yaml():
         candidates.insert(0, env_path)
 
     for yaml_path in candidates:
+        if not os.path.exists(yaml_path):
+            continue
         try:
             with open(yaml_path, "r") as f:
                 data = yaml.safe_load(f)
-            if not data:
-                continue
-
-            # Merge weights
-            yaml_weights = data.get("weights", {})
-            if yaml_weights:
-                WEIGHTS.update(yaml_weights)
-
-            # Merge thresholds
-            yaml_thresholds = data.get("thresholds", {})
-            if yaml_thresholds:
-                THRESHOLDS.update(yaml_thresholds)
-
-            print("scoring_rules.yaml loaded from: %s" % yaml_path)
-            return
-        except:
+        except (IOError, OSError):
+            # Present-but-unreadable: try the next candidate path.
             continue
+        except Exception as e:
+            # File exists but is malformed. Fail loud - silently scoring a
+            # whole corpus with the wrong weights is worse than stopping.
+            raise RuntimeError(
+                "Cthaeh: scoring_rules.yaml at %s is malformed: %s" % (yaml_path, e))
+
+        if not data or "weights" not in data:
+            raise RuntimeError(
+                "Cthaeh: scoring_rules.yaml at %s is empty or missing 'weights'" % yaml_path)
+
+        # Merge weights
+        yaml_weights = data.get("weights", {})
+        if yaml_weights:
+            WEIGHTS.update(yaml_weights)
+
+        # Merge thresholds
+        yaml_thresholds = data.get("thresholds", {})
+        if yaml_thresholds:
+            THRESHOLDS.update(yaml_thresholds)
+
+        print("scoring_rules.yaml loaded from: %s" % yaml_path)
+        return
+
+    print("WARNING: scoring_rules.yaml not found in any search path; using hardcoded default weights")
 
 
 _load_scoring_yaml()

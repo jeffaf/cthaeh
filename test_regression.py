@@ -25,6 +25,11 @@ import sys
 import os
 import argparse
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 
 # Ground truth: drivers with confirmed vulns should score HIGH+
 CONFIRMED_VULNS = {
@@ -52,6 +57,112 @@ SANITY_CHECKS = {
 }
 
 
+# Synthetic finding sets used by --unit scoring tests. Each set is a list of
+# check names from scoring_rules.yaml `weights:`; the test sums their weights
+# and asserts the tier boundary. This catches weight edits that silently
+# move a canonical driver profile across a tier boundary. When a wave
+# intentionally shifts a boundary, update `expected_tier` here as the
+# calibration event.
+SYNTHETIC_PROFILES = {
+    # Tier expectations derived from the current YAML weights on 2026-07-01
+    # against real CRITICAL/HIGH drivers observed in a 340-driver scan
+    # (athw8x.sys, mtkbtfilterx.sys, vhdmp.sys) plus reducer-driven FP
+    # profiles (nvpcf, amdfendr). Recalibrate these tiers whenever a
+    # heuristic wave shifts weights or thresholds.
+    "wifi_god_mode_realistic": {
+        # Modelled on athw8x.sys / athwnx.sys signature (score=285, CRITICAL)
+        "checks": [
+            "insecure_device_creation", "has_ioctl_handler", "method_neither_heavy",
+            "file_any_access_heavy", "no_probe_functions", "maps_locked_pages_cache",
+            "maps_physical_memory", "physical_memory_rw", "named_device",
+            "likely_hvci_incompatible", "vendor_cna_bounty", "wifi_driver",
+            "massive_ioctl_surface", "no_auth_imports", "wmi_method_execution",
+            "port_io_rw", "uefi_variable_access", "compound_easy_target",
+            "vuln_pattern_composite",
+        ],
+        "expected_tier": "CRITICAL",
+        "why": "Regression anchor for the CRITICAL tier — models the Atheros wifi driver signature seen at score=285",
+    },
+    "bt_usb_passthrough_realistic": {
+        # Modelled on the weighted subset of mtkbtfilterx.sys (real score=285
+        # CRITICAL). Several signals on the real driver are informational-only
+        # in scoring_rules.yaml (method_buffered, file_read/write, wmi_provider,
+        # irp_forwarding) so the weighted-only subset lands HIGH, not CRITICAL.
+        # HIGH is the honest anchor: a bt-passthrough signature must clear HIGH.
+        "checks": [
+            "insecure_device_creation", "has_ioctl_handler", "method_neither_heavy",
+            "no_probe_functions", "named_device", "kernel_registry_write",
+            "vendor_cna_bounty", "large_ioctl_surface", "symlink_no_acl",
+            "no_auth_imports", "usb_request_forwarding", "bt_driver_crypto",
+            "efuse_access", "wdm_direct_device", "hardcoded_crypto_key",
+            "hci_command_passthrough", "compound_easy_target",
+        ],
+        "expected_tier": "HIGH",
+        "why": "Regression anchor for the HIGH tier — BT/USB passthrough signature (real driver reaches CRITICAL only with additional file-op stacking)",
+    },
+    "moderate_ioctl_driver": {
+        # A realistic mid-tier candidate: open device, IOCTLs, some auth gaps
+        "checks": [
+            "insecure_device_creation", "has_ioctl_handler", "named_device",
+            "no_probe_functions", "moderate_ioctl_surface", "vendor_cna",
+            "kernel_registry_write",
+        ],
+        "expected_tier": "MEDIUM",
+        "why": "Sanity anchor for the MEDIUM tier — modest IOCTL surface without hard primitives",
+    },
+    "clean_wdf_inbox_driver": {
+        # Canonical FP profile: WDF + WHQL-inbox + validation should suppress
+        "checks": [
+            "has_ioctl_handler", "wdf_device_interface", "whql_signed_inbox",
+            "has_internal_validation",
+        ],
+        "expected_tier": "SKIP",
+        "why": "Canonical FP profile — WDF + WHQL-inbox + validation must land below LOW so reducers cannot silently be neutralized",
+    },
+    "lol_driver_suppressed": {
+        # LOLDrivers already exploited: primitives present but -30 reducer must
+        # drop the tier so triage focuses on novel targets, not rehashes.
+        # Without the reducer this profile scores 85 (MEDIUM); with it, 55 (LOW).
+        "checks": [
+            "msr_write", "physical_memory_rw", "control_register_access",
+            "insecure_device_creation", "has_ioctl_handler",
+            "loldrivers_known",  # -30 reducer
+        ],
+        "expected_tier": "LOW",
+        "why": "LOLDrivers -30 reducer must drop a primitives-bearing known-bad driver from MEDIUM (85) to LOW (55). If this drifts, the 'novel targets first' contract is broken.",
+    },
+    "borderline_low": {
+        # Anchor for the LOW/MEDIUM boundary. Detects threshold drift.
+        "checks": [
+            "has_ioctl_handler", "named_device", "no_probe_functions",
+            "moderate_ioctl_surface",
+        ],
+        "expected_tier": "LOW",
+        "why": "LOW/MEDIUM boundary anchor — if this drifts up or down, threshold recalibration is due",
+    },
+}
+
+
+def _score_yaml_path():
+    """Locate scoring_rules.yaml next to this file, then in cwd."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(here, "scoring_rules.yaml"),
+              os.path.join(os.getcwd(), "scoring_rules.yaml")):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _load_weights():
+    """Load {check_name: weight} from scoring_rules.yaml, or None if yaml unavailable."""
+    path = _score_yaml_path()
+    if not path or yaml is None:
+        return None
+    with open(path, "r") as f:
+        data = yaml.safe_load(f)
+    return data.get("weights", {}) if data else {}
+
+
 def load_investigated_expectations(path="investigated.json"):
     """Load investigated driver expectations from the repo source of truth."""
     if not os.path.exists(path):
@@ -63,10 +174,16 @@ def load_investigated_expectations(path="investigated.json"):
     entries = data.get("investigated", data.get("skip_drivers", {}))
     expectations = {}
     for driver_name, entry in entries.items():
-        reason = entry.get("reason", "investigated") if isinstance(entry, dict) else str(entry)
+        if isinstance(entry, dict):
+            reason = entry.get("reason", "investigated")
+            disposition = entry.get("disposition", "investigated")
+        else:
+            reason = str(entry)
+            disposition = "investigated"
         expectations[driver_name] = {
             "max_priority": "INVESTIGATED",
             "reason": reason,
+            "disposition": disposition,
         }
     return expectations
 
@@ -124,6 +241,36 @@ def run_unit_tests():
         print("  FAIL  no investigated drivers loaded from investigated.json")
         failed += 1
 
+    print("\n=== Investigated Disposition Split ===")
+    dispositions = {e.get("disposition") for e in INVESTIGATEDS.values()}
+    if {"confirmed_vuln", "false_positive"} <= dispositions:
+        print(f"  PASS  disposition split present: {sorted(d for d in dispositions if d)}")
+        passed += 1
+    else:
+        print(f"  FAIL  disposition split incomplete (found {sorted(d for d in dispositions if d)})")
+        failed += 1
+
+    print("\n=== Synthetic Scoring Profiles ===")
+    weights = _load_weights()
+    if weights is None:
+        print("  WARN  pyyaml not installed or scoring_rules.yaml missing; skipping synthetic scoring")
+    else:
+        for profile_name, profile in SYNTHETIC_PROFILES.items():
+            missing = [c for c in profile["checks"] if c not in weights]
+            if missing:
+                print(f"  FAIL  {profile_name}: missing weights for {missing} (edit synthetic profile or yaml)")
+                failed += 1
+                continue
+            score = sum(weights[c] for c in profile["checks"])
+            tier = get_score_tier(score)
+            if tier == profile["expected_tier"]:
+                print(f"  PASS  {profile_name}: score={score} tier={tier}")
+                passed += 1
+            else:
+                print(f"  FAIL  {profile_name}: score={score} tier={tier} (expected {profile['expected_tier']})")
+                print(f"        why: {profile['why']}")
+                failed += 1
+
     print(f"\nUnit results: {passed} passed, {failed} failed")
     return failed == 0
 
@@ -135,59 +282,89 @@ def run_tests(results, strict_missing=False):
     
     print(f"Running regression tests against {len(results)} drivers...\n")
     
-    # Test confirmed vulns
-    print("=== Confirmed Vulnerabilities (should score HIGH+) ===")
+    # Test confirmed vulns. A confirmed vuln overridden to INVESTIGATED does
+    # NOT auto-PASS: that would make the test tautological once the driver is
+    # added to investigated.json. Instead we WARN that scoring cannot be
+    # evaluated on this scan; re-run with the driver temporarily removed from
+    # investigated.json to verify raw scoring.
+    print("=== Confirmed Vulnerabilities (should score HIGH+ on merit) ===")
     for driver_name, expected in CONFIRMED_VULNS.items():
         r = find_driver(results, driver_name)
         if not r:
             print(f"  WARN  {driver_name} - expected sample not in results")
             missing += 1
             continue
-        
+
         score = r.get("score", 0)
         priority = r.get("priority", "?")
         checks = {f["check"] for f in r.get("findings", [])}
-        
-        # INVESTIGATED drivers are expected to be skipped (they've been investigated)
+
         if priority in ("INVESTIGATED", "KNOWN_FP"):
-            print(f"  PASS  {driver_name}: {priority} (already investigated, skip is correct)")
-            passed += 1
+            print(f"  WARN  {driver_name}: {priority} — score unrecoverable, cannot evaluate")
+            print(f"        re-run scan with this entry removed from investigated.json to verify")
+            missing += 1
             continue
-        
-        # Check minimum score
+
         if score >= expected["min_score"]:
             print(f"  PASS  {driver_name}: score={score} priority={priority} (min={expected['min_score']})")
             passed += 1
         else:
             print(f"  FAIL  {driver_name}: score={score} priority={priority} (expected min={expected['min_score']})")
             failed += 1
-        
-        # Check expected checks fired
+
         for check in expected.get("expected_checks", []):
             if check in checks:
                 print(f"        + check '{check}' fired")
             else:
                 print(f"        ! check '{check}' DID NOT fire")
-    
+
     print()
-    
-    # Test known FPs
-    print("=== Known False Positives (should be skipped) ===")
+
+    # Test dispositions with real assertions per class.
+    #   confirmed_vuln  : if scored on merit, must be HIGH+
+    #   false_positive  : if scored on merit, must be below HIGH (raw-signal
+    #                     FP suppression, independent of the override)
+    #   investigated    : neutral — must be either INVESTIGATED-overridden or
+    #                     just present (no scoring assertion)
+    print("=== Investigated Drivers by Disposition ===")
+    from run_triage import SCORE_TIERS
+    high_thresh = SCORE_TIERS["HIGH"]
     for driver_name, expected in INVESTIGATEDS.items():
         r = find_driver(results, driver_name)
         if not r:
             print(f"  WARN  {driver_name} - investigated driver not in results")
             missing += 1
             continue
-        
+
         priority = r.get("priority", "?")
-        accepted = {expected["max_priority"], "KNOWN_FP"}  # Accept legacy label too
-        if priority in accepted:
-            print(f"  PASS  {driver_name}: priority={priority}")
-            passed += 1
+        score = r.get("score", 0)
+        disp = expected.get("disposition", "investigated")
+        overridden = priority in ("INVESTIGATED", "KNOWN_FP")
+
+        if disp == "confirmed_vuln":
+            if overridden:
+                print(f"  PASS  {driver_name}: {priority} [confirmed_vuln, override applied]")
+                passed += 1
+            elif score >= high_thresh:
+                print(f"  PASS  {driver_name}: score={score} priority={priority} [confirmed_vuln, HIGH+ on merit]")
+                passed += 1
+            else:
+                print(f"  FAIL  {driver_name}: score={score} priority={priority} [confirmed_vuln, expected HIGH+]")
+                failed += 1
+        elif disp == "false_positive":
+            if overridden:
+                print(f"  WARN  {driver_name}: {priority} [false_positive, override applied — raw score not evaluable]")
+                missing += 1
+            elif score < high_thresh:
+                print(f"  PASS  {driver_name}: score={score} priority={priority} [false_positive, below HIGH on merit]")
+                passed += 1
+            else:
+                print(f"  FAIL  {driver_name}: score={score} priority={priority} [false_positive, expected below HIGH — reducers failed]")
+                failed += 1
         else:
-            print(f"  FAIL  {driver_name}: priority={priority} (expected={expected['max_priority']})")
-            failed += 1
+            # "investigated" / "ambiguous" — no correctness claim
+            print(f"  PASS  {driver_name}: priority={priority} [{disp}, no assertion]")
+            passed += 1
     
     print()
     

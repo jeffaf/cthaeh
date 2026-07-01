@@ -4,6 +4,59 @@ This roadmap is intentionally practical: Cthaeh is a ranking and triage tool, no
 a vuln oracle. The highest-value work is making the ranking more trustworthy,
 repeatable, and easy to hand off into deeper Ghidra/Claude analysis.
 
+## What "better" means
+
+Cthaeh has exactly one job: **rank the drivers most likely to have bugs first,
+with few false positives near the top, cheaply and repeatably.** Every
+optimization is measured against that contract, not against shape metrics.
+
+**Outcome metrics** (what "better" actually is):
+
+- `precision@10 / @25 / @50` - of the top K by score, what fraction are NOT
+  confirmed false positives? A regression here means analyst time is being
+  wasted at the top of the list.
+- `recall@HIGH` - of confirmed-vuln drivers scored on merit (i.e. not
+  overridden by `investigated.json`), what fraction landed >= HIGH? A drop
+  means real bugs are being buried.
+- `fp_leakage` - count of confirmed-FP drivers whose raw signals still land
+  HIGH+. Any non-zero value is a reducer-suppression bug, not just noise.
+
+**Proxy metrics** (kept for shape, distrusted for correctness):
+
+- `CRITICAL rate <= 5%`, `max_score <= 500`, `score_median`, `score_p90` -
+  these describe the distribution. Both can pass while the ranking is wrong,
+  so they are guardrails, not goals.
+
+**Ground-truth source of truth:** `investigated.json`. Each entry carries a
+`disposition` in `{confirmed_vuln, false_positive, investigated}`. The tests
+and calibration report derive everything from this file. Adding a new label
+is a two-line change; the eval will pick it up on the next run.
+
+**Where the project was optimizing the wrong proxy:**
+
+- `test_regression.SANITY_CHECKS` (max=500, CRITICAL <=5%) enforced score
+  *shape*, not ranking quality. Both currently pass on a 340-driver scan
+  while `amd_dpfc.sys` (a confirmed FP) still ranks HIGH.
+- The old `CONFIRMED_VULNS` test auto-PASSed when a confirmed vuln was
+  overridden to `INVESTIGATED` ("skip is correct"). Once a driver was added
+  to `investigated.json`, the test became tautological.
+- The old `INVESTIGATEDS` test treated confirmed vulns and confirmed FPs as
+  a single "should be skipped" bucket - rewarding Cthaeh for *hiding* both,
+  when the actual goal is scoring the vulns HIGH and the FPs LOW.
+
+**Recalibration loop:**
+
+1. Change a weight, threshold, or check.
+2. Run `python test_regression.py --unit`. Synthetic profiles catch tier
+   boundary drift immediately (no Ghidra needed).
+3. On the next full scan, run
+   `python calibrate_scoring.py --json triage_results.json --baseline calibration_baseline.json`.
+   Baseline drift beyond `DRIFT_TOLERANCE` (calibrate_scoring.py:24-30) fails
+   the check.
+4. If the change is intentional (heuristic wave), re-baseline with
+   `--write-baseline calibration_baseline.json` and record the reason next
+   to the threshold change.
+
 ## Current State
 
 - 97 weighted heuristics across device security, IOCTL surface, BYOVD

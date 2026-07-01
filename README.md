@@ -93,14 +93,27 @@ python run_triage.py C:\drivers --all
 python run_triage.py C:\drivers --hw-check --device-check
 
 # Generate a calibration report from prior results
+# Reports precision@K, recall@HIGH, and fp_leakage — the outcome metrics
+# for "did the ranking do its job?", not just shape metrics.
 python calibrate_scoring.py --json triage_results.json
 
-# Run unit checks that do not require Ghidra output
+# Snapshot the outcome metrics as a baseline for future drift checks
+python calibrate_scoring.py --json triage_results.json --write-baseline calibration_baseline.json
+
+# Detect regression vs. the saved baseline (fails on drift beyond tolerance)
+python calibrate_scoring.py --json triage_results.json --baseline calibration_baseline.json
+
+# Unit checks that do not require Ghidra output:
+#   tier boundaries, disposition split, synthetic scoring profiles that
+#   catch weight edits silently crossing a tier boundary.
 python test_regression.py --unit
 
 # Run regression checks against a real scan
 python test_regression.py --json triage_results.json --strict-missing
 ```
+
+See [ROADMAP.md](ROADMAP.md#what-better-means) for the outcome-metric contract
+and the recalibration loop.
 
 ## Investigated Drivers
 
@@ -113,11 +126,18 @@ will re-scan it.
   "investigated": {
     "example.sys": {
       "reason": "4 vulns submitted to vendor PSIRT",
-      "version": "2.21.0.0"
+      "version": "2.21.0.0",
+      "disposition": "confirmed_vuln"
     }
   }
 }
 ```
+
+`disposition` classifies the entry for calibration: `confirmed_vuln` (should
+score HIGH+ when scanned), `false_positive` (scored high but not exploitable,
+must rank below HIGH), or `investigated` (analyzed, no calibration assertion).
+`calibrate_scoring.py` only flags `false_positive` drivers that still rank
+HIGH+, so confirmed vulns are no longer mistaken for false positives.
 
 ## Requirements
 

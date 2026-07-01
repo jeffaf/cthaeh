@@ -1,40 +1,53 @@
 {
+  "_schema": {
+    "disposition": "confirmed_vuln = known-vulnerable, should score HIGH+ when scanned; false_positive = scored high but not exploitable/reachable, must rank below HIGH; investigated = analyzed, no calibration assertion",
+    "note": "disposition separates the calibration roles that used to be conflated: test_regression and calibrate_scoring read it so confirmed vulns are not treated as false positives."
+  },
   "investigated": {
     "nvpcf.sys": {
       "reason": "FP - MSR read not user-reachable, WDF device interface blocks unprivileged access",
-      "version": null
+      "version": null,
+      "disposition": "false_positive"
     },
     "AMDRyzenMasterDriver.sys": {
       "reason": "Skipped - cannot obtain latest version for analysis",
-      "version": null
+      "version": null,
+      "disposition": "investigated"
     },
     "AsusSAIO.sys": {
       "reason": "1 vuln accepted by ASUS PSIRT, 3 rejected (Feb 2026)",
-      "version": null
+      "version": null,
+      "disposition": "confirmed_vuln"
     },
     "AsusWmiAcpi.sys": {
       "reason": "1 vuln accepted by ASUS PSIRT, 3 rejected (Feb 2026)",
-      "version": null
+      "version": null,
+      "disposition": "confirmed_vuln"
     },
     "ssudbus2.sys": {
       "reason": "4 vulns submitted to Samsung PSIRT (Feb 2026)",
-      "version": "2.21.0.0"
+      "version": "2.21.0.0",
+      "disposition": "confirmed_vuln"
     },
     "mtkbtfilterx.sys": {
       "reason": "Submitted to MediaTek PSIRT MSV-7296 (Feb 2026), under review",
-      "version": null
+      "version": null,
+      "disposition": "confirmed_vuln"
     },
     "mtkwl6ex.sys": {
       "reason": "Submitted to MediaTek PSIRT MSV-6338 (Jan 2026), acknowledged",
-      "version": null
+      "version": null,
+      "disposition": "confirmed_vuln"
     },
     "amd_dpfc.sys": {
       "reason": "Investigated - nothing exploitable found (Feb 2026)",
-      "version": null
+      "version": null,
+      "disposition": "false_positive"
     },
     "amdfendr.sys": {
       "reason": "FP - AMD Fenced Runner, legitimate hardware management driver",
-      "version": null
+      "version": null,
+      "disposition": "false_positive"
     }
   }
 }

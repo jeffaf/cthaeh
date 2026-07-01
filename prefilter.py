@@ -330,13 +330,20 @@ def _load_prefilter_scoring_yaml():
         candidates.insert(0, env_path)
 
     for yaml_path in candidates:
+        if not os.path.exists(yaml_path):
+            continue
         try:
             with open(yaml_path, "r") as f:
                 data = yaml.safe_load(f)
-            if data and "prefilter" in data:
-                return data["prefilter"]
-        except Exception:
+        except (IOError, OSError):
             continue
+        except Exception as e:
+            # File exists but is malformed. Fail loud rather than silently
+            # scoring the prefilter with hardcoded defaults.
+            raise RuntimeError(
+                "Cthaeh: scoring_rules.yaml at %s is malformed: %s" % (yaml_path, e))
+        if data and "prefilter" in data:
+            return data["prefilter"]
 
     return {}
 

@@ -25,6 +25,20 @@ Findings are ranked by leverage (impact / effort). Each is grounded in a specifi
 - Updated `test_regression.py` to load investigated drivers from `investigated.json`, count missing expected drivers as warnings, support `--strict-missing`, and provide `--unit` checks without Ghidra.
 - Rewrote `README.md` in a cleaner researcher-facing style with no emojis or em dashes, and documented calibration plus DTA hash pinning.
 
+## What-better-means pass (2026-07)
+
+- Defined outcome metrics (precision@K, recall@HIGH, fp_leakage) as the primary "did the ranking do its job?" measure. Documented the contract in `ROADMAP.md` and `README.md`.
+- Labeled `investigated.json` entries with a `disposition` field: `confirmed_vuln`, `false_positive`, or `investigated`. This is now the single source of truth for calibration; tests and reports derive everything from it.
+- Extended `calibrate_scoring.py`:
+  - Reports precision@10/25/50, recall@HIGH, and fp_leakage alongside the shape metrics (kept, but marked as proxies).
+  - `--write-baseline PATH` snapshots outcome metrics for drift checks.
+  - `--baseline PATH` compares current metrics to the snapshot and fails on regression beyond `DRIFT_TOLERANCE`.
+- Restructured `test_regression.py`:
+  - Removed the tautological "confirmed vuln + INVESTIGATED override = auto PASS" logic. Overridden confirmed vulns now WARN with instructions for how to re-evaluate scoring on merit.
+  - `Investigated Drivers by Disposition` now asserts differently per class: confirmed_vuln must be HIGH+ (either on merit or via override), false_positive must be below HIGH on merit, investigated has no scoring assertion.
+  - Added `SYNTHETIC_PROFILES` calibrated against real CRITICAL/HIGH drivers in a 340-driver scan. These validate scoring math without Ghidra and fire immediately when a weight edit crosses a tier boundary.
+- Regression fired on first run: `amd_dpfc.sys` (disposition=`false_positive`) scores 190 (HIGH) on raw signals with no reducer. See new finding #13 below.
+
 ---
 
 ## P0 - Scoring calibration (highest leverage)
@@ -186,6 +200,30 @@ Fixed in this review by making `check_symlink_creation` use a raw docstring.
 
 ---
 
+## P1 - False-positive control (continued)
+
+### 13. `amd_dpfc.sys` false-positive has no raw-signal suppression
+Surfaced by the outcome-metric pass. `amd_dpfc.sys` is labeled
+`disposition: false_positive` in `investigated.json` and was analyzed as
+"nothing exploitable" in Feb 2026, but its raw signals still score **190
+(HIGH)** on the 340-driver reference scan. Because the driver was added to
+`investigated.json` after the scan, the runtime override does not fire on
+this record - so the score is exposed and shows that no reducer captures
+why the driver was ruled out. `calibrate_scoring.py` reports it as
+`fp_leakage`; `test_regression.py` FAILs on it in the disposition split.
+
+**Recommend:** either (a) attach a specific reducer explaining why the AMD
+DPFC signal profile is not exploitable (e.g. `has_internal_validation`,
+missing `usb_request_forwarding`, or a new AMD-specific reducer), or (b)
+re-review the driver and update the disposition if the FP conclusion no
+longer holds. Do not just add another entry to `investigated.json` - the
+whole point of the outcome metric is that overrides must not hide missing
+reducers.
+
+**Status:** open, flagged by the new eval.
+
+---
+
 ## P4 - Documentation
 
 ### 11. Undocumented CLI flags and env vars (FIXED in this review)
@@ -208,8 +246,10 @@ its research source and the checks it added, and pin a single tool version const
 ## Verification performed
 
 - `python3 -m py_compile run_triage.py prefilter.py test_regression.py driver_triage.py download_dta.py extract_driverstore.py hw_check.py device_check.py calibrate_scoring.py apply_dta.py` -> OK.
-- `python3 test_regression.py --unit` -> OK, 9 passed and 0 failed.
+- `python3 test_regression.py --unit` -> OK, 16 passed and 0 failed (tier boundaries + disposition split + 6 synthetic profiles).
+- `python3 test_regression.py --json ~/triage_results.json` -> exposes the amd_dpfc.sys FP-leakage regression documented as finding #13.
+- `python3 calibrate_scoring.py --json ~/triage_results.json` -> precision@10=1.00, precision@50=0.98, recall@HIGH=1.00 (3/3), fp_leakage=1.
+- `python3 calibrate_scoring.py ... --write-baseline` and `--baseline` round-trip verified; drift detection fires when fp_leakage_count grows or precision/recall drop past `DRIFT_TOLERANCE`.
 - `scoring_rules.yaml` -> valid YAML, **97 weights**, thresholds 250/150/75/30.
-- `investigated.json`, `driver_cves.json`, and `cna_vendors.json` -> valid JSON.
-- Not verified: a full Ghidra triage run (no Ghidra/`.sys` corpus on this host) and the
-  actual FP/tier-distribution numbers. These require a live scan.
+- `investigated.json`, `driver_cves.json`, and `cna_vendors.json` -> valid JSON. `investigated.json` now carries a `disposition` field on every entry.
+- Not verified: a fresh Ghidra triage run with `amd_dpfc.sys` temporarily removed from `investigated.json` to confirm the raw-signal FP-leakage without cache effects. Requires a live scan.

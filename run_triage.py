@@ -42,26 +42,37 @@ def _load_thresholds():
     defaults = {"CRITICAL": 250, "HIGH": 150, "MEDIUM": 75, "LOW": 30}
     if yaml is None:
         return defaults
-    # Search: same dir as this script, then cwd
+    # Search: CTHAEH_SCORING_PATH override (highest priority), same dir as this
+    # script, then cwd. Mirrors driver_triage.py/prefilter.py so the orchestrator
+    # and the Ghidra script always resolve the same thresholds.
     candidates = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "scoring_rules.yaml"),
         os.path.join(os.getcwd(), "scoring_rules.yaml"),
     ]
+    env_path = os.environ.get("CTHAEH_SCORING_PATH")
+    if env_path:
+        candidates.insert(0, env_path)
     for path in candidates:
-        if os.path.exists(path):
-            try:
-                with open(path, "r") as f:
-                    data = yaml.safe_load(f)
-                thresholds = data.get("thresholds", {})
-                if thresholds:
-                    return {
-                        "CRITICAL": thresholds.get("CRITICAL", defaults["CRITICAL"]),
-                        "HIGH": thresholds.get("HIGH", defaults["HIGH"]),
-                        "MEDIUM": thresholds.get("MEDIUM", defaults["MEDIUM"]),
-                        "LOW": thresholds.get("LOW", defaults["LOW"]),
-                    }
-            except Exception:
-                pass
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f)
+        except (IOError, OSError):
+            continue
+        except Exception as e:
+            # File exists but is malformed. Fail loud rather than silently
+            # falling back to different thresholds than the file claims.
+            raise RuntimeError(
+                "Cthaeh: scoring_rules.yaml at %s is malformed: %s" % (path, e))
+        thresholds = (data or {}).get("thresholds", {})
+        if thresholds:
+            return {
+                "CRITICAL": thresholds.get("CRITICAL", defaults["CRITICAL"]),
+                "HIGH": thresholds.get("HIGH", defaults["HIGH"]),
+                "MEDIUM": thresholds.get("MEDIUM", defaults["MEDIUM"]),
+                "LOW": thresholds.get("LOW", defaults["LOW"]),
+            }
     return defaults
 
 
