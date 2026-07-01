@@ -1452,7 +1452,7 @@ def check_loldrivers(driver_name):
 
 
 def check_symlink_creation(imports, strings):
-    """Check for symbolic link creation without ACL.
+    r"""Check for symbolic link creation without ACL.
     
     From research: drivers with IoCreateSymbolicLink + IoCreateDevice (not Secure)
     are directly accessible via \\.\DeviceName from any user. This was the case

@@ -106,6 +106,11 @@ DriverStore --> extract --> running-only --> pre-filter --> Cthaeh --> ranked li
 
 See [REFERENCE.md](REFERENCE.md) for the full technical reference (all 97 heuristics, CLI flags, anti-pattern tags).
 
+## Review Artifacts
+
+- [IMPROVEMENTS.md](IMPROVEMENTS.md) - prioritized review findings and recommendations.
+- [ROADMAP.md](ROADMAP.md) - v5 scoring, regression, research-feed, and Stage 2 workflow roadmap.
+
 ## Acknowledgments
 
 - WDAC block policy checking and LOLDrivers cross-reference inspired by [HolyGrail](https://github.com/BlackSnufkin/Holygrail) by BlackSnufkin.

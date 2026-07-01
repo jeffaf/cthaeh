@@ -42,28 +42,48 @@ Findings are tagged with KernelSight anti-patterns (AP1-AP6):
 | AP5 | No IOCTL auth / open device ACLs | Easy targets |
 | AP6 | Double-fetch / TOCTOU on user buffers | Race conditions |
 
+## Research Feeds
+
+| Source | Why it matters |
+|--------|----------------|
+| [Exploit Reversing](https://exploitreversing.com/) | Alexandre Borges' long-form reversing/exploitation series. High-value Cthaeh reading queue material, especially the Windows kernel exploitation articles on CVE-2024-30085, the minifilter driver N-day deep dive, I/O Ring, ALPC, token stealing, and PreviousMode techniques. Use it to harvest v5 scoring ideas for minifilter surfaces, exploitation primitives, and Stage 2 Ghidra/Claude prompts. |
+
 ## All CLI Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `drivers_dir` (positional) | – | Directory of `.sys` files to scan |
+| `--drivers-dir` | – | Same as positional, explicit form |
+| `--single` | – | Analyze one `.sys` file |
+| `--explain NAME` | – | Show scoring breakdown for a driver (by name) |
+| `--ghidra` | auto | Path to Ghidra install (else `GHIDRA_HOME`/common paths) |
 | `--running-only` | ON | Only scan loaded drivers (Windows) |
 | `--all` | OFF | Scan all drivers |
 | `--hw-check` | OFF | Post-triage hardware presence check |
 | `--device-check` | OFF | Post-triage device DACL check |
 | `--device-check-min-score` | 75 | Min score for device check |
 | `--research` | OFF | hardware_absent is informational only |
-| `--workers N` | auto | Parallel Ghidra instances |
+| `--workers N` | auto | Parallel Ghidra instances (auto = half CPUs) |
+| `--max N` | 0 | Cap number of drivers analyzed (0 = all) |
 | `--no-prefilter` | OFF | Disable pefile pre-filter |
+| `--prefilter-min N` | 1 | Min prefilter risk_hint to survive the pre-filter (higher = more aggressive) |
 | `--max-size` | 5 | Max driver size in MB for pre-filter |
+| `--output PATH` | triage_results.csv | CSV output path |
 | `--no-json` | OFF | Disable JSON output |
+| `--json-output PATH` | triage_results.json | JSON output path |
 | `--no-report` | OFF | Disable markdown report |
+| `--report PATH` | triage_report.md | Markdown report path |
 | `--report-top` | 20 | Drivers in markdown report |
+| `--min-tier` | HIGH | Minimum tier shown in the console summary |
 
 ## Environment Variables
 
 - `GHIDRA_HOME` - Path to Ghidra installation
-- `CTHAEH_FP_PATH` - Override path to investigated.json
-- `CTHAEH_DTA_PATH` - Override path to .gdt data type archive
+- `CTHAEH_FP_PATH` - Override path to `investigated.json`
+- `CTHAEH_DTA_PATH` - Override path to `.gdt` data type archive
+- `CTHAEH_SCORING_PATH` - Override path to `scoring_rules.yaml` (highest-priority search location)
+- `CTHAEH_CNA_PATH` - Override path to `cna_vendors.json`
+- `CTHAEH_CVES_PATH` - Override path to `driver_cves.json`
 
 ## Files
 
@@ -83,3 +103,5 @@ Findings are tagged with KernelSight anti-patterns (AP1-AP6):
 | `investigated.json` | Already-analyzed drivers (skipped on scan) |
 | `policies/` | WDAC block policies + LOLDrivers data |
 | `test_regression.py` | Regression tests |
+| `IMPROVEMENTS.md` | Review findings + prioritized recommendations |
+| `ROADMAP.md` | Forward-looking heuristic + workflow roadmap (v5) |
