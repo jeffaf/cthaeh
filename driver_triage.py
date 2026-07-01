@@ -363,6 +363,24 @@ def get_weight(check_id):
     return WEIGHTS.get(check_id, 0)
 
 
+def score_findings(findings):
+    """Calculate total score from finding dictionaries."""
+    return sum(f.get("score", 0) for f in findings)
+
+
+def priority_for_score(score):
+    """Return priority tier for a numeric score."""
+    if score >= THRESHOLDS["CRITICAL"]:
+        return "CRITICAL"
+    elif score >= THRESHOLDS["HIGH"]:
+        return "HIGH"
+    elif score >= THRESHOLDS["MEDIUM"]:
+        return "MEDIUM"
+    elif score >= THRESHOLDS["LOW"]:
+        return "LOW"
+    return "SKIP"
+
+
 # --- Known FP / Skip List ---
 def load_investigated():
     """Load known false positives / already-investigated drivers."""
@@ -412,6 +430,29 @@ def load_investigated():
 
 
 INVESTIGATED = load_investigated()
+
+
+def get_investigated_entry(driver_name):
+    """Return investigated entry for driver_name using case-insensitive matching."""
+    if driver_name in INVESTIGATED:
+        return INVESTIGATED[driver_name]
+
+    driver_lower = driver_name.lower()
+    for name, entry in INVESTIGATED.items():
+        if name.lower() == driver_lower:
+            return entry
+
+    return None
+
+
+def get_driver_version(driver_info):
+    """Return best parsed driver version string from driver metadata."""
+    version = driver_info.get("version")
+    if version:
+        return version
+
+    version_info = driver_info.get("version_info", {})
+    return version_info.get("FileVersion", version_info.get("ProductVersion", ""))
 
 
 def load_driver_cves():
@@ -1724,12 +1765,14 @@ def check_comms_capability(imports):
 
     Drivers WITH comms capability are more interesting because they're
     attackable from userspace. Checks for: IoCreateDevice, IoCreateSymbolicLink,
-    FltRegisterFilter, FltCreateCommunicationPort, IofCompleteRequest.
+    FltRegisterFilter, FltCreateCommunicationPort, IofCompleteRequest,
+    IoCompleteRequest, and WdfRequestComplete.
     """
     findings = []
     comms_imports = {
         "iocreatedevice", "iocreatesymboliclink", "fltregisterfilter",
         "fltcreatecommunicationport", "iofcompleterequest",
+        "iocompleterequest", "wdfrequestcomplete",
     }
     found = imports & comms_imports
     if len(found) >= 2:
@@ -1748,11 +1791,11 @@ def check_ppl_killer(imports):
     = can terminate protected processes (AV/EDR/PPL).
     """
     findings = []
-    has_terminate = "zwterminateprocess" in imports
-    has_open = "zwopenprocess" in imports
+    has_terminate = "zwterminateprocess" in imports or "ntterminateprocess" in imports
+    has_open = "zwopenprocess" in imports or "ntopenprocess" in imports
     has_lookup = "pslookupprocessbyprocessid" in imports
     if has_terminate and (has_open or has_lookup):
-        opener = "ZwOpenProcess" if has_open else "PsLookupProcessByProcessId"
+        opener = "ZwOpenProcess/NtOpenProcess" if has_open else "PsLookupProcessByProcessId"
         findings.append({
             "check": "ppl_killer_potential",
             "detail": "PPL killer: ZwTerminateProcess + %s (can terminate protected processes)" % opener,
@@ -2140,7 +2183,11 @@ def check_memory_corruption_patterns(imports, program):
     
     has_free = any(f in imports for f in free_funcs)
     has_deref = any(f in imports for f in deref_funcs)
-    has_ioctl = "iofcompleterequestex" in imports or "wdfrequestcomplete" in imports or "iocompleterequestex" in imports
+    has_ioctl = (
+        "iofcompleterequest" in imports or "iocompleterequest" in imports or
+        "iofcompleterequestex" in imports or "iocompleterequestex" in imports or
+        "wdfrequestcomplete" in imports
+    )
     
     # Check for free functions in IOCTL dispatch context
     if has_free and has_ioctl:
@@ -2237,7 +2284,11 @@ def check_byovd_primitives(imports, program):
     
     has_map_io = "mmmapiospace" in imports or "mmmapiospaceex" in imports
     has_map_locked = "mmmaplockedpages" in imports or "mmmaplockedpageswithreservedmapping" in imports or "mmmaplockedpagesspecifycache" in imports
-    has_ioctl = "iofcompleterequestex" in imports or "iocompleterequestex" in imports
+    has_ioctl = (
+        "iofcompleterequest" in imports or "iocompleterequest" in imports or
+        "iofcompleterequestex" in imports or "iocompleterequestex" in imports or
+        "wdfrequestcomplete" in imports
+    )
     has_device = "iocreatedevice" in imports or "iocreatesymboliclink" in imports
     
     # Arbitrary kernel read: MmMapIoSpace in driver with IOCTL handling + device
@@ -2401,7 +2452,7 @@ def check_killer_driver(imports, strings):
     return findings
 
 
-def check_bloatware_oem(strings, driver_name):
+def check_bloatware_oem(strings, driver_name, program=None):
     """Detect bloatware/OEM utility drivers (#12).
     
     References:
@@ -2456,26 +2507,24 @@ def check_bloatware_oem(strings, driver_name):
             "score": get_weight("utility_driver_strings"),
         })
     
-    # PE timestamp age check (driver age)
-    try:
-        pe_header = program.getMemory().getBlock(".text")
-        # Try to get TimeDateStamp from PE header
-        exe_path = program.getExecutablePath()
-        # Use program creation date as proxy if available
-        creation = program.getCreationDate()
-        if creation:
-            import java.util.Date as Date
-            now = Date()
-            age_ms = now.getTime() - creation.getTime()
-            age_years = age_ms / (365.25 * 24 * 60 * 60 * 1000)
-            if age_years >= 5:
-                findings.append({
-                    "check": "driver_age_5plus",
-                    "detail": "Driver appears to be %.1f years old (older drivers = higher risk)" % age_years,
-                    "score": get_weight("driver_age_5plus"),
-                })
-    except Exception:
-        pass  # Age check is best-effort
+    if program is not None:
+        # Program creation date is a proxy for age when PE TimeDateStamp is not
+        # exposed by the active Ghidra scripting runtime.
+        try:
+            creation = program.getCreationDate()
+            if creation:
+                import java.util.Date as Date
+                now = Date()
+                age_ms = now.getTime() - creation.getTime()
+                age_years = age_ms / (365.25 * 24 * 60 * 60 * 1000)
+                if age_years >= 5:
+                    findings.append({
+                        "check": "driver_age_5plus",
+                        "detail": "Driver appears to be %.1f years old (older drivers = higher risk)" % age_years,
+                        "score": get_weight("driver_age_5plus"),
+                    })
+        except Exception:
+            pass  # Age check is best-effort
     
     return findings
 
@@ -2771,7 +2820,7 @@ def check_candidate_points(program, imports):
 # v8: Double-fetch / TOCTOU detection (#14)
 # =============================================================================
 
-def check_double_fetch(program, imports):
+def check_double_fetch(program, imports, findings_so_far=None):
     """Detect double-fetch / TOCTOU patterns in IOCTL handlers (#14).
 
     Looks for METHOD_NEITHER IOCTLs where user buffer pointers
@@ -2790,6 +2839,11 @@ def check_double_fetch(program, imports):
     if not has_irp:
         return findings
 
+    prior_checks = set()
+    if findings_so_far:
+        prior_checks = {f.get("check", "") for f in findings_so_far}
+    has_method_neither = bool(prior_checks & {"method_neither", "method_neither_heavy"})
+
     # User buffer pointer patterns that indicate direct user-space access
     USER_BUFFER_PATTERNS = [
         "type3inputbuffer",
@@ -2803,84 +2857,99 @@ def check_double_fetch(program, imports):
 
     double_fetch_funcs = []
 
-    for func in func_mgr.getFunctions(True):
-        func_name = func.getName().lower()
+    decomp = None
+    try:
+        from ghidra.app.decompiler import DecompInterface
+        decomp = DecompInterface()
+        decomp.openProgram(program)
+    except Exception:
+        decomp = None
 
-        # Focus on dispatch/IOCTL handler functions
-        if not any(kw in func_name for kw in [
-            "dispatch", "ioctl", "internal", "device_control",
-            "devicecontrol", "irp", "handler",
-        ]):
-            continue
+    try:
+        for func in func_mgr.getFunctions(True):
+            func_name = func.getName().lower()
 
-        # Try decompiled output first (Ghidra's DecompInterface)
-        decomp_text = None
-        try:
-            from ghidra.app.decompiler import DecompInterface
-            decomp = DecompInterface()
-            decomp.openProgram(program)
-            result = decomp.decompileFunction(func, 30, None)
-            if result and result.decompileCompleted():
-                decomp_func = result.getDecompiledFunction()
-                if decomp_func:
-                    decomp_text = decomp_func.getC()
-            decomp.dispose()
-        except Exception:
+            # Focus on dispatch/IOCTL handler functions
+            if not any(kw in func_name for kw in [
+                "dispatch", "ioctl", "internal", "device_control",
+                "devicecontrol", "irp", "handler",
+            ]):
+                continue
+
             decomp_text = None
+            if decomp is not None:
+                try:
+                    result = decomp.decompileFunction(func, 30, None)
+                    if result and result.decompileCompleted():
+                        decomp_func = result.getDecompiledFunction()
+                        if decomp_func:
+                            decomp_text = decomp_func.getC()
+                except Exception:
+                    decomp_text = None
 
-        if decomp_text:
-            # Check for repeated references to user buffer pointers
-            text_lower = decomp_text.lower()
-            for pattern in USER_BUFFER_PATTERNS:
-                count = text_lower.count(pattern)
-                if count >= 2:
-                    double_fetch_funcs.append({
-                        "func": func.getName(),
-                        "pattern": pattern,
-                        "count": count,
-                    })
-                    break  # One pattern match per function is enough
-        else:
-            # Fallback: instruction-level analysis
-            # Look for multiple memory loads from the same IRP offset
-            # in a single function (heuristic for repeated user buffer reads)
-            try:
-                body = func.getBody()
-                inst_iter = listing.getInstructions(body, True)
-                # Track memory operand patterns that look like IRP field accesses
-                # Typical pattern: [reg+0x18] or [reg+0x60] for UserBuffer/Type3InputBuffer
-                irp_offsets = {}  # offset -> count
-                while inst_iter.hasNext():
-                    insn = inst_iter.next()
-                    mnemonic = insn.getMnemonicString().lower()
-                    if mnemonic in ("mov", "lea"):
-                        insn_str = str(insn).lower()
-                        # Look for IRP-related field offsets:
-                        # 0x18 = Type3InputBuffer (in IO_STACK_LOCATION.Parameters)
-                        # 0x60 = Irp->UserBuffer
-                        # 0x70 = Irp->MdlAddress
-                        for offset in ["0x18", "0x60", "0x70"]:
-                            if offset in insn_str:
-                                irp_offsets[offset] = irp_offsets.get(offset, 0) + 1
-
-                for offset, count in irp_offsets.items():
-                    if count >= 3:  # Same offset read 3+ times = suspicious
+            if decomp_text:
+                # Check for repeated references to user buffer pointers
+                text_lower = decomp_text.lower()
+                for pattern in USER_BUFFER_PATTERNS:
+                    count = text_lower.count(pattern)
+                    if count >= 2:
                         double_fetch_funcs.append({
                             "func": func.getName(),
-                            "pattern": "IRP offset %s" % offset,
+                            "pattern": pattern,
                             "count": count,
                         })
-                        break
+                        break  # One pattern match per function is enough
+            else:
+                # Fallback: instruction-level analysis
+                # Look for multiple memory loads from the same IRP offset
+                # in a single function (heuristic for repeated user buffer reads)
+                try:
+                    body = func.getBody()
+                    inst_iter = listing.getInstructions(body, True)
+                    # Track memory operand patterns that look like IRP field accesses
+                    # Typical pattern: [reg+0x18] or [reg+0x60] for UserBuffer/Type3InputBuffer
+                    irp_offsets = {}  # offset -> count
+                    while inst_iter.hasNext():
+                        insn = inst_iter.next()
+                        mnemonic = insn.getMnemonicString().lower()
+                        if mnemonic in ("mov", "lea"):
+                            insn_str = str(insn).lower()
+                            # Look for IRP-related field offsets:
+                            # 0x18 = Type3InputBuffer (in IO_STACK_LOCATION.Parameters)
+                            # 0x60 = Irp->UserBuffer
+                            # 0x70 = Irp->MdlAddress
+                            for offset in ["0x18", "0x60", "0x70"]:
+                                if offset in insn_str:
+                                    irp_offsets[offset] = irp_offsets.get(offset, 0) + 1
+
+                    for offset, count in irp_offsets.items():
+                        if count >= 3:  # Same offset read 3+ times = suspicious
+                            double_fetch_funcs.append({
+                                "func": func.getName(),
+                                "pattern": "IRP offset %s" % offset,
+                                "count": count,
+                            })
+                            break
+                except Exception:
+                    pass
+    finally:
+        if decomp is not None:
+            try:
+                decomp.dispose()
             except Exception:
                 pass
 
     if double_fetch_funcs:
         details = ["%s (%s x%d)" % (df["func"], df["pattern"], df["count"])
                    for df in double_fetch_funcs[:5]]
+        score = get_weight("double_fetch_indicator") if has_method_neither else 0
+        detail = "Potential double-fetch/TOCTOU: user buffer read multiple times in: %s" % "; ".join(details)
+        if not has_method_neither:
+            detail += " (informational: no METHOD_NEITHER corroboration)"
         findings.append({
             "check": "double_fetch_indicator",
-            "detail": "Potential double-fetch/TOCTOU: user buffer read multiple times in: %s" % "; ".join(details),
-            "score": get_weight("double_fetch_indicator"),
+            "detail": detail,
+            "score": score,
         })
 
     return findings
@@ -3064,6 +3133,8 @@ def get_driver_info(program):
         company = version_fields.get("CompanyName", "")
         product = version_fields.get("ProductName", version_fields.get("FileDescription", ""))
         version = version_fields.get("FileVersion", version_fields.get("ProductVersion", ""))
+        if version:
+            info["version"] = version
         summary_parts = [p for p in [company, product, version] if p]
         if summary_parts:
             info["version_summary"] = " | ".join(summary_parts)
@@ -3214,7 +3285,7 @@ def run():
     # Check known FP / already-investigated list
     # Supports both old format ("driver.sys": "reason string")
     # and new format ("driver.sys": {"reason": "...", "version": "1.2.3"})
-    skip_entry = INVESTIGATED.get(driver_name)
+    skip_entry = get_investigated_entry(driver_name)
     skip_reason = None
     if skip_entry:
         if isinstance(skip_entry, str):
@@ -3222,7 +3293,7 @@ def run():
             skip_reason = skip_entry
         elif isinstance(skip_entry, dict):
             entry_version = skip_entry.get("version")
-            driver_version = driver_info.get("version", "")
+            driver_version = get_driver_version(driver_info)
             if entry_version and driver_version and entry_version != driver_version:
                 # Version mismatch: driver was updated, re-scan it
                 skip_reason = None
@@ -3306,11 +3377,11 @@ def run():
     all_findings.extend(check_byovd_primitives(imports, program))
     all_findings.extend(check_ioring_surface(imports, strings))
     all_findings.extend(check_killer_driver(imports, strings))
-    all_findings.extend(check_bloatware_oem(strings, driver_name))
+    all_findings.extend(check_bloatware_oem(strings, driver_name, program))
     # v7.1: Kernel Rhabdomancer - candidate point analysis (call graph + per-function API mapping)
     all_findings.extend(check_candidate_points(program, imports))
     # v8: Double-fetch / TOCTOU detection (#14)
-    all_findings.extend(check_double_fetch(program, imports))
+    all_findings.extend(check_double_fetch(program, imports, all_findings))
     # v8: On-disk offset trust detection (#15) - needs driver class info from prior checks
     _dc_info = {"class": "UNKNOWN", "category": "Unclassified"}
     for _f in all_findings:
@@ -3325,18 +3396,8 @@ def run():
     all_findings.extend(check_compound_primitives(all_findings))
     all_findings.extend(check_vuln_pattern_composite(all_findings, imports))
     
-    total_score = sum(f["score"] for f in all_findings)
-    
-    if total_score >= THRESHOLDS["CRITICAL"]:
-        priority = "CRITICAL"
-    elif total_score >= THRESHOLDS["HIGH"]:
-        priority = "HIGH"
-    elif total_score >= THRESHOLDS["MEDIUM"]:
-        priority = "MEDIUM"
-    elif total_score >= THRESHOLDS["LOW"]:
-        priority = "LOW"
-    else:
-        priority = "SKIP"
+    total_score = score_findings(all_findings)
+    priority = priority_for_score(total_score)
     
     # Extract vendor CNA info from findings for top-level access
     vendor_info = {}

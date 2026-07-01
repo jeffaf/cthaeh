@@ -96,6 +96,7 @@ Findings are tagged with KernelSight anti-patterns (AP1-AP6):
 | `scoring_rules.yaml` | All scoring weights and thresholds |
 | `apply_dta.py` | Ghidra pre-script: loads Talos DTA |
 | `download_dta.py` | Downloads the Talos .gdt file |
+| `calibrate_scoring.py` | Reports score distribution and calibration guardrails |
 | `hw_check.py` | Hardware presence check via PnP enumeration |
 | `device_check.py` | Device object DACL check |
 | `cna_vendors.json` | CNA status + bounty URLs per vendor |

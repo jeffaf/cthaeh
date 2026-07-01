@@ -136,6 +136,7 @@ weights:
   hci_command_passthrough: 20
   urb_from_user_input: 20
   no_inputbuffer_length_check: 15
+  # Informational only until paired with a dangerous user-buffer dereference.
   previousmode_relevant: 0
 
   # v7: AwesomeMalDevLinks-inspired checks
@@ -173,6 +174,7 @@ weights:
   candidate_no_validation: 15
 
   # v8: Double-fetch / TOCTOU (#14)
+  # Scored only when METHOD_NEITHER corroboration is present.
   double_fetch_indicator: 20
 
   # v8: On-disk offset trust (#15)

@@ -1,20 +1,25 @@
-# 🌳 Cthaeh
+# Cthaeh
 
-Ghidra-powered triage scanner for Windows kernel drivers. Scores drivers on 97 vulnerability heuristics so you know which `.sys` files to pull apart first.
+Ghidra powered triage scanner for Windows kernel drivers. Cthaeh scores `.sys`
+files across 97 vulnerability heuristics so vulnerability researchers can decide
+which drivers deserve manual reverse engineering first.
 
-Cthaeh doesn't find vulnerabilities. It finds the drivers most likely to *have* them, so you can focus your reverse engineering time where it matters.
+Cthaeh is not a vulnerability finder and does not generate exploits. It is a
+ranking and evidence collection tool for driver attack surface, dangerous
+kernel primitives, validation gaps, BYOVD utility, vendor context, and prior
+CVE history.
 
 ## Sample Output
 
-```
+```text
 ============================================================
-  🌳 CTHAEH TRIAGE COMPLETE: 340 drivers analyzed
+  CTHAEH TRIAGE COMPLETE: 340 drivers analyzed
 ============================================================
-  💀 CRITICAL:        2
-  🔴 HIGH priority:   14
-  🟡 MEDIUM priority: 38
-  🟢 LOW priority:    72
-  ⚪ SKIP:            214
+  CRITICAL:        2
+  HIGH priority:   14
+  MEDIUM priority: 38
+  LOW priority:    72
+  SKIP:            214
 
 Top targets (>= HIGH):
 
@@ -24,59 +29,84 @@ Top targets (>= HIGH):
    4. [HIGH    ] 240 pts  hvservice.sys
 ```
 
-### Explain Mode
-
-```
-============================================================
-  Driver: ssudbus2.sys v2.21.0.0 (Samsung Electronics)
-============================================================
-  Vendor: Samsung (CNA: YES) | Bounty: PRESENT
-  Score: 285 | Priority: CRITICAL
-  Priority: CRITICAL - IMMEDIATE - full reverse engineering, build PoC exploit
-
-  Scored checks:
-    + 25  [msr_write] Contains WRMSR instruction(s)
-    + 20  [symlink_no_acl] Symbolic link + IoCreateDevice without Secure
-    + 20  [port_io_rw] Port I/O: 12 IN + 8 OUT instructions
-    ...
-```
-
 ## Quick Start
 
 ```bash
 pip install -r requirements.txt
-python download_dta.py                              # Talos type archive (once)
-python extract_driverstore.py --output C:\drivers   # Pull third-party drivers
+python download_dta.py
+python extract_driverstore.py --output C:\drivers
 
-python run_triage.py C:\drivers                     # Scan (only loaded drivers by default)
-python run_triage.py C:\drivers --all               # Scan everything
-python run_triage.py --single C:\path\to\driver.sys # Single driver
-python run_triage.py --explain example.sys          # Explain a score
+python run_triage.py C:\drivers
+python run_triage.py C:\drivers --all
+python run_triage.py --single C:\path\to\driver.sys
+python run_triage.py --explain example.sys
 ```
 
-Set `GHIDRA_HOME` and you never need `--ghidra`. Pre-filter, parallel workers, JSON, and markdown report are all on by default.
+Set `GHIDRA_HOME` to avoid passing `--ghidra` each time. Pre-filtering, parallel
+workers, JSON output, and markdown reporting are enabled by default.
 
-## How It Works
+For repeatable DTA setup, pin the Talos archive hash:
 
-1. **Running-only filter** (Windows default): scans only loaded drivers. `--all` to override.
-2. **Pre-filter** (pefile): drops uninteresting drivers in milliseconds (~37% eliminated)
-3. **Parallel Ghidra headless**: N workers (auto = half CPUs)
-4. **97 heuristic checks**: dangerous primitives, IOCTL surface, BYOVD, validation gaps, memory corruption, vendor context, and more
-5. **Enriched output**: CSV + JSON + markdown report with vendor/CNA status, prior CVEs, and actionable recommendations
+```bash
+python download_dta.py --sha256 <expected_sha256>
+```
+
+You can also set `CTHAEH_DTA_SHA256` in the environment.
+
+## Research Workflow
+
+1. Extract a candidate corpus from DriverStore.
+2. Run the pre-filter to keep obvious low-signal drivers out of Ghidra.
+3. Run Ghidra headless analysis in parallel.
+4. Review HIGH and CRITICAL drivers first.
+5. Use `--explain` to inspect why a driver ranked highly.
+6. Validate device accessibility and hardware presence when relevant.
+7. Record completed work in `investigated.json` so known results are skipped.
+
+```text
+DriverStore -> extract -> running-only -> pre-filter -> Cthaeh -> ranked list -> manual audit
+```
 
 ## Priority Tiers
 
 | Tier | Threshold | Action |
 |------|-----------|--------|
-| 💀 CRITICAL | ≥250 | Drop everything and analyze |
-| 🔴 HIGH | ≥150 | Investigate soon |
-| 🟡 MEDIUM | ≥75 | Worth a look |
-| 🟢 LOW | ≥30 | Probably boring |
-| ⚪ SKIP | <30 | Move on |
+| CRITICAL | >= 250 | Analyze immediately |
+| HIGH | >= 150 | Investigate soon |
+| MEDIUM | >= 75 | Worth a look |
+| LOW | >= 30 | Park unless new context appears |
+| SKIP | < 30 | Deprioritize |
+
+Thresholds and weights live in `scoring_rules.yaml`. Treat threshold changes as
+calibration events, not one-off edits.
+
+## Useful Commands
+
+```bash
+# Scan only loaded drivers, the default on Windows
+python run_triage.py C:\drivers
+
+# Scan every driver in the directory
+python run_triage.py C:\drivers --all
+
+# Include post-triage hardware and device DACL checks
+python run_triage.py C:\drivers --hw-check --device-check
+
+# Generate a calibration report from prior results
+python calibrate_scoring.py --json triage_results.json
+
+# Run unit checks that do not require Ghidra output
+python test_regression.py --unit
+
+# Run regression checks against a real scan
+python test_regression.py --json triage_results.json --strict-missing
+```
 
 ## Investigated Drivers
 
-Already-analyzed drivers go in `investigated.json` and are skipped on future scans. Supports version-aware skipping: if a driver is updated (version changes), it gets re-scanned automatically.
+Already analyzed drivers go in `investigated.json` and are skipped on future
+scans. Version-aware skipping is supported: if a driver version changes, Cthaeh
+will re-scan it.
 
 ```json
 {
@@ -89,40 +119,30 @@ Already-analyzed drivers go in `investigated.json` and are skipped on future sca
 }
 ```
 
-## The Workflow
-
-```
-DriverStore --> extract --> running-only --> pre-filter --> Cthaeh --> ranked list --> manual audit
-                                                                                        |
-                                                           Claude Code + Ghidra MCP --> vuln
-```
-
 ## Requirements
 
-- Python 3.8+ with `pefile`, `pyyaml`
-- Ghidra 10.x+ (headless mode)
-- Ghidra 12.x: run `support/pyghidraRun` once if prompted so PyGhidra is installed
-- Windows for DriverStore extraction (analysis works on any OS)
+- Python 3.8+ with `pefile` and `pyyaml`
+- Ghidra 10.x+ in headless mode
+- Ghidra 12.x users may need to run `support/pyghidraRun` once if prompted
+- Windows for DriverStore extraction, hardware checks, and device DACL checks
+- Analysis can run on any OS with Ghidra and extracted `.sys` files
 
-See [REFERENCE.md](REFERENCE.md) for the full technical reference (all 97 heuristics, CLI flags, anti-pattern tags).
+See [REFERENCE.md](REFERENCE.md) for the full technical reference, CLI flags,
+environment variables, and heuristic categories.
 
 ## Review Artifacts
 
-- [IMPROVEMENTS.md](IMPROVEMENTS.md) - prioritized review findings and recommendations.
-- [ROADMAP.md](ROADMAP.md) - v5 scoring, regression, research-feed, and Stage 2 workflow roadmap.
+- [IMPROVEMENTS.md](IMPROVEMENTS.md) - prioritized review findings, actions, and recommendations.
+- [ROADMAP.md](ROADMAP.md) - scoring, regression, research-feed, and Stage 2 workflow roadmap.
 
 ## Acknowledgments
 
 - WDAC block policy checking and LOLDrivers cross-reference inspired by [HolyGrail](https://github.com/BlackSnufkin/Holygrail) by BlackSnufkin.
-- Kernel Rhabdomancer candidate point strategy inspired by [Rhabdomancer.java](https://github.com/0xdea/ghidra-scripts/blob/main/Rhabdomancer.java) by Marco Ivaldi (0xdea). See also: [Automating binary vulnerability discovery with Ghidra and Semgrep](https://hnsecurity.it/blog/automating-binary-vulnerability-discovery-with-ghidra-and-semgrep/).
-- Anti-pattern tagging (AP1-AP6) based on [KernelSight](https://splintersfury.github.io/KernelSight/guides/secure-driver-anatomy/) vulnerability root cause analysis across 134 CVEs.
+- Kernel Rhabdomancer candidate point strategy inspired by [Rhabdomancer.java](https://github.com/0xdea/ghidra-scripts/blob/main/Rhabdomancer.java) by Marco Ivaldi.
+- Anti-pattern tagging based on [KernelSight](https://splintersfury.github.io/KernelSight/guides/secure-driver-anatomy/) vulnerability root cause analysis.
 - Framework detection and YAML scoring inspired by [DriverAtlas](https://github.com/splintersfury/DriverAtlas) by splintersfury.
 - Ghidra Data Type Archive for Windows drivers by [Talos Intelligence](https://blog.talosintelligence.com/ghidra-data-type-archive-for-windows-drivers/).
 
 ## License
 
 MIT
-
----
-
-*"The Cthaeh does not lie. The Cthaeh sees the true shape of the world."*
