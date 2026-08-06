@@ -33,7 +33,7 @@ Top targets (>= HIGH):
 
 ```bash
 pip install -r requirements.txt
-python Cthaeh.py --ghidra "C:\ghidra\ghidra_12.0.3_PUBLIC"
+python cthaeh.py --ghidra "C:\ghidra\ghidra_12.0.3_PUBLIC"
 ```
 
 That one command runs the normal Windows workflow: it downloads the Talos DTA
@@ -54,7 +54,7 @@ C:\ghidra\ghidra_12.0.3_PUBLIC\
 In that layout, the correct argument is:
 
 ```bash
-python Cthaeh.py --ghidra "C:\ghidra\ghidra_12.0.3_PUBLIC"
+python cthaeh.py --ghidra "C:\ghidra\ghidra_12.0.3_PUBLIC"
 ```
 
 The parent directory also works when it contains an extracted `ghidra_*`
@@ -66,29 +66,29 @@ directories. In PowerShell:
 
 ```powershell
 $env:GHIDRA_HOME = "C:\ghidra\ghidra_12.0.3_PUBLIC"
-python Cthaeh.py
+python cthaeh.py
 ```
 
 Use `--drivers-dir` to change the corpus directory and `--all` to extract and
 scan every driver instead of only loaded drivers:
 
 ```bash
-python Cthaeh.py --ghidra "C:\ghidra\ghidra_12.0.3_PUBLIC" --drivers-dir D:\cthaeh\drivers --all
+python cthaeh.py --ghidra "C:\ghidra\ghidra_12.0.3_PUBLIC" --drivers-dir D:\cthaeh\drivers --all
 ```
 
 For an existing corpus, a single driver, or an existing result file, use the
 same entry point's scan mode:
 
 ```bash
-python Cthaeh.py scan C:\drivers --ghidra "C:\ghidra\ghidra_12.0.3_PUBLIC" --all
-python Cthaeh.py scan --single C:\path\to\driver.sys --ghidra "C:\ghidra\ghidra_12.0.3_PUBLIC"
-python Cthaeh.py scan --explain example.sys
+python cthaeh.py scan C:\drivers --ghidra "C:\ghidra\ghidra_12.0.3_PUBLIC" --all
+python cthaeh.py scan --single C:\path\to\driver.sys --ghidra "C:\ghidra\ghidra_12.0.3_PUBLIC"
+python cthaeh.py scan --explain example.sys
 ```
 
 For repeatable DTA setup, pin the Talos archive hash:
 
 ```bash
-python Cthaeh.py setup --sha256 <expected_sha256>
+python cthaeh.py setup --sha256 <expected_sha256>
 ```
 
 You can also set `CTHAEH_DTA_SHA256` in the environment.
@@ -124,35 +124,35 @@ calibration events, not one-off edits.
 
 ```bash
 # Scan only loaded drivers, the default on Windows
-python Cthaeh.py scan C:\drivers
+python cthaeh.py scan C:\drivers
 
 # Scan every driver in the directory
-python Cthaeh.py scan C:\drivers --all
+python cthaeh.py scan C:\drivers --all
 
 # Include post-triage hardware and device DACL checks
-python Cthaeh.py scan C:\drivers --hw-check --device-check
+python cthaeh.py scan C:\drivers --hw-check --device-check
 
 # Extract a corpus without immediately scanning it
-python Cthaeh.py extract --output C:\drivers
+python cthaeh.py extract --output C:\drivers
 
 # Generate a calibration report from prior results
 # Reports precision@K, recall@HIGH, and fp_leakage — the outcome metrics
 # for "did the ranking do its job?", not just shape metrics.
-python Cthaeh.py calibrate --json triage_results.json
+python cthaeh.py calibrate --json triage_results.json
 
 # Snapshot the outcome metrics as a baseline for future drift checks
-python Cthaeh.py calibrate --json triage_results.json --write-baseline calibration_baseline.json
+python cthaeh.py calibrate --json triage_results.json --write-baseline calibration_baseline.json
 
 # Detect regression vs. the saved baseline (fails on drift beyond tolerance)
-python Cthaeh.py calibrate --json triage_results.json --baseline calibration_baseline.json
+python cthaeh.py calibrate --json triage_results.json --baseline calibration_baseline.json
 
 # Unit checks that do not require Ghidra output:
 #   tier boundaries, disposition split, synthetic scoring profiles that
 #   catch weight edits silently crossing a tier boundary.
-python Cthaeh.py test --unit
+python cthaeh.py test --unit
 
 # Run regression checks against a real scan
-python Cthaeh.py test --json triage_results.json --strict-missing
+python cthaeh.py test --json triage_results.json --strict-missing
 ```
 
 See [ROADMAP.md](ROADMAP.md#what-better-means) for the outcome-metric contract

@@ -8,14 +8,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import Cthaeh
+import cthaeh
 
 
 class CthaehCliTests(unittest.TestCase):
     def test_subcommand_dispatches_to_implementation_script(self):
         completed = mock.Mock(returncode=7)
-        with mock.patch.object(Cthaeh.subprocess, "run", return_value=completed) as run:
-            status = Cthaeh.main(["scan", "drivers", "--all"])
+        with mock.patch.object(cthaeh.subprocess, "run", return_value=completed) as run:
+            status = cthaeh.main(["scan", "drivers", "--all"])
 
         self.assertEqual(status, 7)
         command = run.call_args.args[0]
@@ -25,7 +25,7 @@ class CthaehCliTests(unittest.TestCase):
     def test_pipeline_dry_run_builds_setup_extract_and_scan_commands(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            status = Cthaeh.main([
+            status = cthaeh.main([
                 "--dry-run",
                 "--drivers-dir",
                 r"C:\corpus",
@@ -45,7 +45,7 @@ class CthaehCliTests(unittest.TestCase):
     def test_explain_is_scan_only(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            status = Cthaeh.main(["--dry-run", "--explain", "example.sys"])
+            status = cthaeh.main(["--dry-run", "--explain", "example.sys"])
 
         rendered = output.getvalue()
         self.assertEqual(status, 0)
@@ -58,9 +58,9 @@ class CthaehCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             nested = Path(directory) / "vendor"
             nested.mkdir()
-            self.assertFalse(Cthaeh.has_driver_files(directory))
+            self.assertFalse(cthaeh.has_driver_files(directory))
             (nested / "sample.sys").touch()
-            self.assertTrue(Cthaeh.has_driver_files(directory))
+            self.assertTrue(cthaeh.has_driver_files(directory))
 
 
 if __name__ == "__main__":

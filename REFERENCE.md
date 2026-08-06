@@ -50,7 +50,7 @@ Findings are tagged with KernelSight anti-patterns (AP1-AP6):
 
 ## All CLI Flags
 
-`Cthaeh.py` is the public entry point. Run it without a subcommand for the full
+`cthaeh.py` is the public entry point. Run it without a subcommand for the full
 setup, extraction, and scan workflow. Its `scan` subcommand accepts the flags
 below; `setup`, `extract`, `calibrate`, and `test` expose the corresponding
 maintenance operations through the same entry point.
@@ -94,7 +94,7 @@ maintenance operations through the same entry point.
 
 | File | Purpose |
 |------|---------|
-| `Cthaeh.py` | Unified CLI and end-to-end workflow |
+| `cthaeh.py` | Unified CLI and end-to-end workflow |
 | `driver_triage.py` | Ghidra headless script (97 checks) |
 | `run_triage.py` | Internal scan orchestrator (parallel, prefilter, running-only, explain) |
 | `prefilter.py` | Fast PE import pre-filter |

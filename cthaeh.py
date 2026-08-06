@@ -63,14 +63,14 @@ def default_drivers_dir():
 
 def build_pipeline_parser():
     parser = argparse.ArgumentParser(
-        prog="Cthaeh.py",
+        prog="cthaeh.py",
         description=(
             "Download Cthaeh's DTA dependency, extract Windows drivers, and "
             "run the triage scanner. Unknown scan options are passed through "
             "to the scanner."
         ),
         epilog=(
-            "Other operations: Cthaeh.py scan|setup|extract|calibrate|test --help"
+            "Other operations: cthaeh.py scan|setup|extract|calibrate|test --help"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
