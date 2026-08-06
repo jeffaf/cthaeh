@@ -85,6 +85,19 @@ Findings are tagged with KernelSight anti-patterns (AP1-AP6):
 - `CTHAEH_CNA_PATH` - Override path to `cna_vendors.json`
 - `CTHAEH_CVES_PATH` - Override path to `driver_cves.json`
 
+## Ghidra Startup
+
+Cthaeh reads `Ghidra/application.properties` to select the launcher. Ghidra
+10/11 uses `support/analyzeHeadless`; Ghidra 12+ uses
+`support/pyghidraRun --headless` because Python scripting moved to PyGhidra.
+Both launchers must be initialized interactively before a batch scan: select a
+supported JDK for Ghidra, and on Ghidra 12 install PyGhidra when prompted.
+
+The runner checks startup once with noninteractive input. A setup problem is
+reported before pre-filtering and worker creation, and failed analyses include
+the tail of Ghidra's output instead of only `no triage output`. A scan where
+every Ghidra analysis fails exits with a nonzero status.
+
 ## Files
 
 | File | Purpose |

@@ -142,10 +142,17 @@ HIGH+, so confirmed vulns are no longer mistaken for false positives.
 ## Requirements
 
 - Python 3.8+ with `pefile` and `pyyaml`
-- Ghidra 10.x+ in headless mode
-- Ghidra 12.x users may need to run `support/pyghidraRun` once if prompted
+- Ghidra 10.x+ in headless mode. Launch Ghidra once after installation to select
+  a supported JDK before starting a batch scan.
+- Ghidra 12.x uses PyGhidra for Python scripts; run `support/pyghidraRun` once
+  interactively to complete its installation before starting a batch scan.
 - Windows for DriverStore extraction, hardware checks, and device DACL checks
 - Analysis can run on any OS with Ghidra and extracted `.sys` files
+
+The orchestrator uses `analyzeHeadless` on Ghidra 10/11 and
+`pyghidraRun --headless` on Ghidra 12+. It performs a noninteractive startup check before
+pre-filtering so missing JDK or PyGhidra setup is reported once instead of
+timing out every worker.
 
 See [REFERENCE.md](REFERENCE.md) for the full technical reference, CLI flags,
 environment variables, and heuristic categories.

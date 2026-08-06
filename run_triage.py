@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import subprocess
@@ -92,6 +93,14 @@ def get_score_tier(score):
         return "LOW"
     else:
         return "SKIP"
+
+
+def configure_console_output():
+    """Keep status output from crashing on legacy Windows code pages."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="replace")
 
 
 def get_tier_recommendation(tier, has_hardware=None, has_device_access=None):
@@ -262,18 +271,44 @@ def find_sys_files(directory):
     return sys_files
 
 
+def get_ghidra_version(ghidra_path):
+    """Return Ghidra's numeric version tuple, or an empty tuple if unknown."""
+    properties_path = os.path.join(ghidra_path, "Ghidra", "application.properties")
+    try:
+        with open(properties_path, "r") as f:
+            for line in f:
+                if not line.startswith("application.version="):
+                    continue
+                version = line.split("=", 1)[1].strip()
+                parts = []
+                for part in version.split("."):
+                    digits = "".join(c for c in part if c.isdigit())
+                    if not digits:
+                        break
+                    parts.append(int(digits))
+                return tuple(parts)
+    except (IOError, OSError):
+        pass
+    return ()
+
+
 def get_ghidra_headless_launcher(ghidra_path):
-    """Return the best available Ghidra headless launcher and extra args."""
+    """Return the appropriate Ghidra headless launcher and extra args.
+
+    Ghidra 11 and earlier include Python scripting in analyzeHeadless. Ghidra
+    12 moved Python scripts to PyGhidra, so those releases need pyghidraRun.
+    Prefer analyzeHeadless when the version is unknown because pyghidraRun may
+    start an interactive package installation on first use.
+    """
     if sys.platform == "win32":
-        candidates = [
-            ("pyghidraRun", os.path.join(ghidra_path, "support", "pyghidraRun.bat"), ["--headless"]),
-            ("analyzeHeadless", os.path.join(ghidra_path, "support", "analyzeHeadless.bat"), []),
-        ]
+        pyghidra = ("pyghidraRun", os.path.join(ghidra_path, "support", "pyghidraRun.bat"), ["--headless"])
+        analyze = ("analyzeHeadless", os.path.join(ghidra_path, "support", "analyzeHeadless.bat"), [])
     else:
-        candidates = [
-            ("pyghidraRun", os.path.join(ghidra_path, "support", "pyghidraRun"), ["--headless"]),
-            ("analyzeHeadless", os.path.join(ghidra_path, "support", "analyzeHeadless"), []),
-        ]
+        pyghidra = ("pyghidraRun", os.path.join(ghidra_path, "support", "pyghidraRun"), ["--headless"])
+        analyze = ("analyzeHeadless", os.path.join(ghidra_path, "support", "analyzeHeadless"), [])
+
+    version = get_ghidra_version(ghidra_path)
+    candidates = [pyghidra, analyze] if version and version[0] >= 12 else [analyze, pyghidra]
 
     for name, path, extra_args in candidates:
         if os.path.exists(path):
@@ -282,17 +317,77 @@ def get_ghidra_headless_launcher(ghidra_path):
     return None, [], None
 
 
+def _diagnostic_tail(*outputs, max_lines=12, max_chars=1600):
+    """Return a compact tail of captured subprocess output."""
+    lines = []
+    for output in outputs:
+        if not output:
+            continue
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        lines.extend(line.strip() for line in output.splitlines() if line.strip())
+    return " | ".join(lines[-max_lines:])[-max_chars:]
+
+
+def check_ghidra_startup(ghidra_path, timeout=30):
+    """Verify that the selected launcher starts without an interactive prompt."""
+    launcher, extra_args, launcher_name = get_ghidra_headless_launcher(ghidra_path)
+    if not launcher:
+        return None, f"Ghidra headless not found in {os.path.join(ghidra_path, 'support')}"
+
+    try:
+        result = subprocess.run(
+            [launcher, *extra_args],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        detail = _diagnostic_tail(e.stdout, e.stderr)
+        suffix = f": {detail}" if detail else ""
+        return launcher_name, f"Ghidra startup timed out after {timeout}s{suffix}"
+    except Exception as e:
+        return launcher_name, f"Ghidra startup failed: {e}"
+
+    detail = _diagnostic_tail(result.stdout, result.stderr)
+    lower = detail.lower()
+    startup_errors = (
+        "do you wish to install pyghidra",
+        "do you wish to upgrade pyghidra",
+        "supported version of python not found",
+        "could not be found and must be manually chosen",
+        "failed to find a supported jdk",
+        "unable to prompt user for jdk path",
+        "permissionerror",
+        "eoferror",
+    )
+    if any(message in lower for message in startup_errors):
+        if launcher_name == "pyghidraRun" and "pyghidra" in lower:
+            return launcher_name, (
+                "PyGhidra is not initialized. Run support/pyghidraRun once "
+                f"interactively, then retry. Launcher output: {detail}"
+            )
+        return launcher_name, f"Ghidra startup is not configured: {detail}"
+
+    # A launcher called without project arguments should print usage and exit.
+    # Any other silent/nonzero exit is a real startup failure.
+    if result.returncode != 0 and "usage" not in lower:
+        return launcher_name, f"Ghidra startup failed (exit {result.returncode}): {detail or 'no output'}"
+    return launcher_name, None
+
+
 def run_ghidra_analysis(args_tuple):
     """Run Ghidra headless analysis on a single driver.
 
     Takes a tuple for ProcessPoolExecutor compatibility:
-    (ghidra_path, driver_path, script_path, project_dir, worker_id)
+    (ghidra_path, driver_path, script_path, project_dir, job_id)
     """
-    ghidra_path, driver_path, script_path, project_base, worker_id = args_tuple
+    ghidra_path, driver_path, script_path, project_base, job_id = args_tuple
     
-    # Each worker gets its own project directory to avoid conflicts
-    project_dir = os.path.join(project_base, f"worker_{worker_id}")
-    os.makedirs(project_dir, exist_ok=True)
+    # Executor jobs are not pinned to a process, so a round-robin worker ID is
+    # not enough to prevent two concurrent jobs from sharing a Ghidra project.
+    project_dir = project_base
 
     headless, headless_args, _ = get_ghidra_headless_launcher(ghidra_path)
     if not headless:
@@ -300,12 +395,14 @@ def run_ghidra_analysis(args_tuple):
 
     driver_name = Path(driver_path).stem
     script_dir = os.path.dirname(script_path)
+    project_key = hashlib.sha256(os.path.abspath(driver_path).encode("utf-8")).hexdigest()[:12]
+    project_name = f"triage_{driver_name}_{job_id}_{project_key}"
 
     cmd = [
         headless,
         *headless_args,
         project_dir,
-        f"triage_{driver_name}",
+        project_name,
         "-import", driver_path,
         "-postScript", os.path.basename(script_path),
         "-deleteProject",
@@ -323,6 +420,7 @@ def run_ghidra_analysis(args_tuple):
             cmd,
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
             timeout=300,  # 5 minute timeout per driver
         )
         
@@ -332,10 +430,15 @@ def run_ghidra_analysis(args_tuple):
                 json_str = output.split("===TRIAGE_START===")[1].split("===TRIAGE_END===")[0].strip()
                 return json.loads(json_str), None
         
-        return None, "no triage output"
-            
-    except subprocess.TimeoutExpired:
-        return None, "timeout (>5min)"
+        detail = _diagnostic_tail(result.stdout, result.stderr)
+        if result.returncode != 0:
+            return None, f"Ghidra exit {result.returncode}: {detail or 'no output'}"
+        return None, f"no triage output: {detail or 'Ghidra produced no diagnostics'}"
+
+    except subprocess.TimeoutExpired as e:
+        detail = _diagnostic_tail(e.stdout, e.stderr)
+        suffix = f": {detail}" if detail else ""
+        return None, f"timeout (>5min){suffix}"
     except json.JSONDecodeError as e:
         return None, f"bad JSON: {e}"
     except Exception as e:
@@ -457,9 +560,9 @@ def run_analysis(drivers, ghidra_path, script_path, project_dir, workers=1, json
     completed = 0
     total = len(drivers)
 
-    # Build args tuples with worker IDs (round-robin assignment)
+    # Give every analysis a unique job ID for its Ghidra project name.
     args_list = [
-        (ghidra_path, driver_path, script_path, project_dir, i % max(workers, 1))
+        (ghidra_path, driver_path, script_path, project_dir, i)
         for i, driver_path in enumerate(drivers)
     ]
 
@@ -817,6 +920,7 @@ def detect_cpu_count():
 
 
 def main():
+    configure_console_output()
     parser = argparse.ArgumentParser(
         description="🌳 Cthaeh - Driver vulnerability triage scanner",
         epilog="""Examples:
@@ -909,6 +1013,12 @@ def main():
     headless, _, headless_name = get_ghidra_headless_launcher(ghidra_path)
     if not headless:
         parser.error(f"Invalid Ghidra path: {ghidra_path} (no pyghidraRun or analyzeHeadless found in support/)")
+
+    # Fail once, before pre-filtering or spawning workers, if Ghidra needs an
+    # interactive JDK/PyGhidra setup step.
+    headless_name, startup_error = check_ghidra_startup(ghidra_path)
+    if startup_error:
+        parser.error(startup_error)
 
     # Auto-detect worker count
     workers = args.workers if args.workers > 0 else detect_cpu_count()
@@ -1033,6 +1143,8 @@ def main():
     except:
         pass
 
+    return 0 if results else 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
