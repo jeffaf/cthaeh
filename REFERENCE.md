@@ -50,13 +50,18 @@ Findings are tagged with KernelSight anti-patterns (AP1-AP6):
 
 ## All CLI Flags
 
+`Cthaeh.py` is the public entry point. Run it without a subcommand for the full
+setup, extraction, and scan workflow. Its `scan` subcommand accepts the flags
+below; `setup`, `extract`, `calibrate`, and `test` expose the corresponding
+maintenance operations through the same entry point.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `drivers_dir` (positional) | – | Directory of `.sys` files to scan |
 | `--drivers-dir` | – | Same as positional, explicit form |
 | `--single` | – | Analyze one `.sys` file |
 | `--explain NAME` | – | Show scoring breakdown for a driver (by name) |
-| `--ghidra` | auto | Path to Ghidra install (else `GHIDRA_HOME`/common paths) |
+| `--ghidra` | auto | Path to a Ghidra install or its parent folder (else `GHIDRA_HOME`/common paths) |
 | `--running-only` | ON | Only scan loaded drivers (Windows) |
 | `--all` | OFF | Scan all drivers |
 | `--hw-check` | OFF | Post-triage hardware presence check |
@@ -89,8 +94,9 @@ Findings are tagged with KernelSight anti-patterns (AP1-AP6):
 
 | File | Purpose |
 |------|---------|
+| `Cthaeh.py` | Unified CLI and end-to-end workflow |
 | `driver_triage.py` | Ghidra headless script (97 checks) |
-| `run_triage.py` | Orchestrator (parallel, prefilter, running-only, explain) |
+| `run_triage.py` | Internal scan orchestrator (parallel, prefilter, running-only, explain) |
 | `prefilter.py` | Fast PE import pre-filter |
 | `extract_driverstore.py` | Extracts third-party .sys from DriverStore |
 | `scoring_rules.yaml` | All scoring weights and thresholds |

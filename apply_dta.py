@@ -46,7 +46,7 @@ def apply_dta():
 
     if gdt_path is None:
         println("[apply_dta] WARNING: No .gdt file found. Skipping DTA import.")
-        println("[apply_dta]   Run: python download_dta.py")
+        println("[apply_dta]   Run: python Cthaeh.py setup")
         println("[apply_dta]   Or set CTHAEH_DTA_PATH environment variable.")
         return
 

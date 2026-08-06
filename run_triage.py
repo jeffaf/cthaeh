@@ -115,7 +115,7 @@ def get_tier_recommendation(tier, has_hardware=None, has_device_access=None):
 def load_enrichment_data():
     """Load CNA vendor and CVE history data for report enrichment."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    
+
     # Load CNA vendors
     cna_vendors = {}
     cna_path = os.path.join(script_dir, "cna_vendors.json")
@@ -125,7 +125,7 @@ def load_enrichment_data():
             cna_vendors = data.get("vendors", {})
     except Exception:
         pass
-    
+
     # Load driver CVEs
     driver_cves = {}
     cves_path = os.path.join(script_dir, "driver_cves.json")
@@ -135,7 +135,7 @@ def load_enrichment_data():
             driver_cves = data.get("driver_families", {})
     except Exception:
         pass
-    
+
     return cna_vendors, driver_cves
 
 
@@ -161,16 +161,16 @@ def match_cve_family(driver_name, driver_cves):
 
 def get_running_drivers():
     """Get list of currently loaded driver filenames on Windows.
-    
+
     Uses 'driverquery /fo csv' to enumerate running drivers, then extracts
     the module names. Returns a set of lowercase .sys filenames.
-    
+
     Returns None if not on Windows or command fails.
     """
     if sys.platform != "win32":
         print("WARNING: --running-only requires Windows. Skipping filter.")
         return None
-    
+
     try:
         result = subprocess.run(
             ["driverquery", "/fo", "csv", "/v"],
@@ -179,17 +179,17 @@ def get_running_drivers():
         if result.returncode != 0:
             print(f"WARNING: driverquery failed: {result.stderr.strip()}")
             return None
-        
+
         running = set()
         lines = result.stdout.strip().split("\n")
         if len(lines) < 2:
             return None
-        
+
         # Parse CSV header to find the module name column
         import csv as csv_mod
         reader = csv_mod.reader(lines)
         header = next(reader)
-        
+
         # Find the "Module Name" column (or similar)
         module_col = None
         path_col = None
@@ -199,11 +199,11 @@ def get_running_drivers():
                 module_col = idx
             elif "path" in col_clean:
                 path_col = idx
-        
+
         if module_col is None:
             # Fallback: first column is usually module name
             module_col = 0
-        
+
         for row in reader:
             if len(row) > module_col:
                 module_name = row[module_col].strip().strip('"').lower()
@@ -212,9 +212,9 @@ def get_running_drivers():
                     if not module_name.endswith(".sys"):
                         module_name += ".sys"
                     running.add(module_name)
-        
+
         return running
-        
+
     except FileNotFoundError:
         print("WARNING: driverquery not found. Not on Windows?")
         return None
@@ -228,17 +228,17 @@ def get_running_drivers():
 
 def filter_running_drivers(sys_files, running_drivers):
     """Filter sys_files list to only include currently running drivers.
-    
+
     Args:
         sys_files: list of full paths to .sys files
         running_drivers: set of lowercase .sys filenames from get_running_drivers()
-    
+
     Returns:
         filtered list of paths
     """
     if running_drivers is None:
         return sys_files
-    
+
     kept = []
     filtered_out = 0
     for path in sys_files:
@@ -247,7 +247,7 @@ def filter_running_drivers(sys_files, running_drivers):
             kept.append(path)
         else:
             filtered_out += 1
-    
+
     print(f"  Running-only filter: {len(kept)} loaded / {filtered_out} not loaded (filtered out)")
     return kept
 
@@ -282,6 +282,43 @@ def get_ghidra_headless_launcher(ghidra_path):
     return None, [], None
 
 
+def resolve_ghidra_install(path):
+    """Resolve an install root from either Ghidra itself or its parent folder.
+
+    Ghidra archives unpack into a versioned directory such as
+    ``ghidra_12.0.3_PUBLIC``.  It is common to put that directory under a
+    simpler ``C:\\ghidra`` folder and point GHIDRA_HOME at the parent.  Accept
+    both layouts so the normal Cthaeh command does not require version-specific
+    configuration.
+    """
+    if not path:
+        return None
+
+    path = os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
+    if not os.path.isdir(path):
+        return None
+
+    if get_ghidra_headless_launcher(path)[0]:
+        return path
+
+    try:
+        children = [
+            os.path.join(path, name)
+            for name in os.listdir(path)
+            if name.lower().startswith("ghidra")
+            and os.path.isdir(os.path.join(path, name))
+        ]
+    except OSError:
+        return None
+
+    # Prefer the newest-looking version name when several archives are present.
+    for candidate in sorted(children, reverse=True):
+        if get_ghidra_headless_launcher(candidate)[0]:
+            return candidate
+
+    return None
+
+
 def run_ghidra_analysis(args_tuple):
     """Run Ghidra headless analysis on a single driver.
 
@@ -289,7 +326,7 @@ def run_ghidra_analysis(args_tuple):
     (ghidra_path, driver_path, script_path, project_dir, worker_id)
     """
     ghidra_path, driver_path, script_path, project_base, worker_id = args_tuple
-    
+
     # Each worker gets its own project directory to avoid conflicts
     project_dir = os.path.join(project_base, f"worker_{worker_id}")
     os.makedirs(project_dir, exist_ok=True)
@@ -317,7 +354,7 @@ def run_ghidra_analysis(args_tuple):
     dta_gdt = os.path.join(script_dir, "data", "windows_driver_types.gdt")
     if os.path.exists(dta_script) and os.path.exists(dta_gdt):
         cmd.extend(["-preScript", "apply_dta.py"])
-    
+
     try:
         result = subprocess.run(
             cmd,
@@ -325,15 +362,15 @@ def run_ghidra_analysis(args_tuple):
             text=True,
             timeout=300,  # 5 minute timeout per driver
         )
-        
+
         # Extract JSON from output (check both stdout and stderr)
         for output in [result.stdout, result.stderr]:
             if "===TRIAGE_START===" in output and "===TRIAGE_END===" in output:
                 json_str = output.split("===TRIAGE_START===")[1].split("===TRIAGE_END===")[0].strip()
                 return json.loads(json_str), None
-        
+
         return None, "no triage output"
-            
+
     except subprocess.TimeoutExpired:
         return None, "timeout (>5min)"
     except json.JSONDecodeError as e:
@@ -344,7 +381,7 @@ def run_ghidra_analysis(args_tuple):
 
 def run_prefilter(drivers_dir, max_size_mb=5, min_risk_hint=0):
     """Run the pefile pre-filter to eliminate uninteresting drivers.
-    
+
     Args:
         min_risk_hint: Minimum prefilter risk_hint score to send to Ghidra.
             0 = send everything with attack surface (default, backward compat).
@@ -380,21 +417,21 @@ def write_json(results, output_path):
 def write_csv(results, output_path):
     """Write results to CSV, sorted by score descending."""
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    
+
     with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "Priority", "Score", "Driver", "Class", "Path", "Size",
             "Functions", "Findings", "Top Checks"
         ])
-        
+
         for r in results:
             driver = r.get("driver", {})
             findings = r.get("findings", [])
             top_checks = ", ".join(
                 f["check"] for f in sorted(findings, key=lambda x: x["score"], reverse=True)[:5]
             )
-            
+
             dc = r.get("driver_class", {})
             driver_cls = dc.get("class", "?") if dc else "?"
 
@@ -409,7 +446,7 @@ def write_csv(results, output_path):
                 r.get("findings_count", 0),
                 top_checks,
             ])
-    
+
     print(f"\nResults written to: {output_path}")
 
 
@@ -424,7 +461,7 @@ def print_summary(results, min_tier="HIGH"):
     medium = sum(1 for r in results if r.get("priority") == "MEDIUM")
     low = sum(1 for r in results if r.get("priority") == "LOW")
     skip = sum(1 for r in results if r.get("priority") == "SKIP")
-    
+
     print(f"\n{'='*60}")
     print(f"  🌳 CTHAEH TRIAGE COMPLETE: {total} drivers analyzed")
     print(f"{'='*60}")
@@ -434,7 +471,7 @@ def print_summary(results, min_tier="HIGH"):
     print(f"  🟢 LOW priority:    {low}")
     print(f"  ⚪ SKIP:            {skip}")
     print()
-    
+
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
     # Filter to min_tier and above
     filtered = [r for r in results
@@ -513,9 +550,9 @@ def _stream_json(results, output_path):
 def write_report(results, output_path, top_n=20):
     """Generate a markdown triage report for top candidates."""
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    
+
     cna_vendors, driver_cves = load_enrichment_data()
-    
+
     total = len(results)
     critical = sum(1 for r in results if r.get("priority") == "CRITICAL")
     high = sum(1 for r in results if r.get("priority") == "HIGH")
@@ -523,12 +560,12 @@ def write_report(results, output_path, top_n=20):
     low = sum(1 for r in results if r.get("priority") == "LOW")
     skip = sum(1 for r in results if r.get("priority") == "SKIP")
     investigated_count = sum(1 for r in results if r.get("priority") == "INVESTIGATED")
-    
+
     PRIORITY_EMOJI = {
         "CRITICAL": "💀", "HIGH": "🔴", "MEDIUM": "🟡",
         "LOW": "🟢", "SKIP": "⚪", "INVESTIGATED": "🚫"
     }
-    
+
     lines = []
     lines.append("# Cthaeh Triage Report")
     lines.append("")
@@ -547,7 +584,7 @@ def write_report(results, output_path, top_n=20):
     lines.append("")
     lines.append(f"## Top {top_n} Candidates")
     lines.append("")
-    
+
     for i, r in enumerate(results[:top_n], 1):
         driver = r.get("driver", {})
         name = driver.get("name", "unknown")
@@ -556,24 +593,24 @@ def write_report(results, output_path, top_n=20):
         emoji = PRIORITY_EMOJI.get(priority, "❓")
         version_summary = driver.get("version_summary", "")
         skip_reason = r.get("skip_reason", "")
-        
+
         # Build enhanced driver header with version
         header_name = name
         if version_summary:
             # Try to extract just the version number from version_summary
             header_name = f"{name}"
-        
+
         lines.append(f"### {i}. {emoji} {header_name} (Score: {score}, {priority})")
         lines.append("")
-        
+
         if skip_reason:
             lines.append(f"> **Skipped:** {skip_reason}")
             lines.append("")
             continue
-        
+
         if version_summary:
             lines.append(f"**Vendor/Product:** {version_summary}")
-        
+
         # Enhanced vendor + CNA info from enrichment data
         vendor_key, vendor_data = match_vendor_from_enrichment(name, cna_vendors)
         vi = r.get("vendor_info", {})
@@ -587,7 +624,7 @@ def write_report(results, output_path, top_n=20):
             cna_str = "CNA: YES" if vi.get("is_cna") else "CNA: NO"
             bounty_str = f" | Bounty: PRESENT ([link]({vi['bounty_url']}))" if vi.get("bounty_url") else ""
             lines.append(f"**Vendor:** {vi.get('vendor_name', '?')} ({cna_str}){bounty_str}")
-        
+
         # Prior CVE history from enrichment data
         cve_family = match_cve_family(name, driver_cves)
         if cve_family:
@@ -597,14 +634,14 @@ def write_report(results, output_path, top_n=20):
             if cve_count > 3:
                 cve_examples += f", +{cve_count - 3} more"
             lines.append(f"**Prior CVEs:** {cve_count} ({cve_examples})")
-        
+
         # Driver class
         dc = r.get("driver_class", {})
         if dc and dc.get("class", "UNKNOWN") != "UNKNOWN":
             lines.append(f"**Driver Class:** {dc['class']} ({dc.get('category', '')})")
-        
+
         lines.append(f"**Size:** {driver.get('size', 0):,} bytes | **Functions:** {driver.get('function_count', 0)}")
-        
+
         # Hardware presence info (Issue #3)
         hw = r.get("hardware_check", {})
         hw_present = None
@@ -619,7 +656,7 @@ def write_report(results, output_path, top_n=20):
                 hw_present = False
             elif hw_status == "UNKNOWN":
                 lines.append(f"**Hardware:** ❓ Unknown ({hw.get('reason', '')})")
-        
+
         # Device access info (Issue #4)
         dc_check = r.get("device_check", {})
         device_access = None
@@ -634,7 +671,7 @@ def write_report(results, output_path, top_n=20):
             }
             access_str = ACCESS_ICONS.get(access, access)
             lines.append(f"**Device Access:** {access_str} ({dc_check.get('detail', '')})")
-        
+
         # Actionable recommendation based on score tier
         tier = get_score_tier(score)
         recommendation = get_tier_recommendation(tier, hw_present, device_access)
@@ -644,26 +681,26 @@ def write_report(results, output_path, top_n=20):
         # Group findings by score (high to low), skip zero-score
         findings = sorted(r.get("findings", []), key=lambda x: x["score"], reverse=True)
         scored_findings = [f for f in findings if f["score"] != 0]
-        
+
         if scored_findings:
             lines.append("**Key findings:**")
             for f in scored_findings:
                 score_str = f"+{f['score']}" if f["score"] > 0 else str(f["score"])
                 lines.append(f"- [{score_str}] {f['detail']}")
             lines.append("")
-    
+
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    
+
     print(f"Markdown report written to: {output_path}")
 
 
 def explain_driver(results, driver_name):
     """Show detailed scoring breakdown for a specific driver."""
     driver_name_lower = driver_name.lower()
-    
+
     cna_vendors, driver_cves = load_enrichment_data()
-    
+
     match = None
     for r in results:
         d = r.get("driver", {})
@@ -671,7 +708,7 @@ def explain_driver(results, driver_name):
         if name.lower() == driver_name_lower or name.lower().replace(".sys", "") == driver_name_lower.replace(".sys", ""):
             match = r
             break
-    
+
     if not match:
         print(f"Driver '{driver_name}' not found in results.")
         print("Available drivers:")
@@ -679,18 +716,18 @@ def explain_driver(results, driver_name):
             d = r.get("driver", {})
             print(f"  {d.get('name', '?')} ({r.get('score', 0)} pts)")
         return
-    
+
     d = match.get("driver", {})
     name = d.get("name", "?")
     score = match.get("score", 0)
     version_str = ""
     if d.get("version_summary"):
         version_str = f" {d['version_summary']}"
-    
+
     print(f"\n{'='*60}")
     print(f"  Driver: {name}{version_str}")
     print(f"{'='*60}")
-    
+
     # Vendor + CNA status from enrichment
     vendor_key, vendor_data = match_vendor_from_enrichment(name, cna_vendors)
     vi = match.get("vendor_info", {})
@@ -703,7 +740,7 @@ def explain_driver(results, driver_name):
         cna_str = "CNA: YES" if vi.get("is_cna") else "CNA: NO"
         bounty_str = f" | Bounty: {vi['bounty_url']}" if vi.get("bounty_url") else ""
         print(f"  Vendor: {vi.get('vendor_name', '?')} ({cna_str}){bounty_str}")
-    
+
     # Prior CVEs from enrichment
     cve_family = match_cve_family(name, driver_cves)
     if cve_family:
@@ -712,14 +749,14 @@ def explain_driver(results, driver_name):
         if len(cves) > 3:
             cve_examples += f", +{len(cves) - 3} more"
         print(f"  Prior CVEs: {len(cves)} ({cve_examples})")
-    
+
     print(f"  Score: {score} | Priority: {match.get('priority', '?')}")
     print(f"  Size: {d.get('size', 0):,} bytes | Functions: {d.get('function_count', 0)}")
-    
+
     dc = match.get("driver_class", {})
     if dc and dc.get("class", "UNKNOWN") != "UNKNOWN":
         print(f"  Driver Class: {dc['class']} ({dc.get('category', '')})")
-    
+
     hw = match.get("hardware_check", {})
     hw_present = None
     if hw:
@@ -730,23 +767,23 @@ def explain_driver(results, driver_name):
         elif hw_status == "HARDWARE_ABSENT":
             print(f"  Hardware: ABSENT (no matching PnP device)")
             hw_present = False
-    
+
     dc_check = match.get("device_check", {})
     device_access = None
     if dc_check:
         device_access = dc_check.get("access_level", "")
         print(f"  Device Access: {device_access} ({dc_check.get('detail', '')})")
-    
+
     # Actionable recommendation
     tier = get_score_tier(score)
     recommendation = get_tier_recommendation(tier, hw_present, device_access)
     print(f"  Priority: {tier} - {recommendation}")
     print()
-    
+
     findings = match.get("findings", [])
     scored = sorted([f for f in findings if f["score"] != 0], key=lambda x: x["score"], reverse=True)
     zero = [f for f in findings if f["score"] == 0]
-    
+
     if scored:
         print("  Scored checks:")
         total_pos = 0
@@ -759,12 +796,12 @@ def explain_driver(results, driver_name):
             else:
                 total_neg += f["score"]
         print(f"\n    Positive: +{total_pos} | Negative: {total_neg} | Net: {total_pos + total_neg}")
-    
+
     if zero:
         print(f"\n  Informational ({len(zero)} checks, 0 pts each):")
         for f in zero:
             print(f"    [0]  [{f['check']}] {f['detail']}")
-    
+
     print()
 
 
@@ -772,9 +809,10 @@ def detect_ghidra():
     """Auto-detect Ghidra installation from env var or common paths."""
     # 1. Environment variable
     env = os.environ.get("GHIDRA_HOME")
-    if env and os.path.isdir(env):
-        return env
-    
+    resolved = resolve_ghidra_install(env)
+    if resolved:
+        return resolved
+
     # 2. Common install paths
     candidates = []
     if sys.platform == "win32":
@@ -798,12 +836,13 @@ def detect_ghidra():
                                 candidates.append(full)
                 except PermissionError:
                     pass
-    
-    # Pick the most recent version (sort descending)
-    if candidates:
-        candidates.sort(reverse=True)
-        return candidates[0]
-    
+
+    # Pick the most recent valid version (sort descending).
+    for candidate in sorted(candidates, reverse=True):
+        resolved = resolve_ghidra_install(candidate)
+        if resolved:
+            return resolved
+
     return None
 
 
@@ -873,14 +912,14 @@ def main():
                         help="Scan all drivers, not just running ones (overrides --running-only)")
 
     args = parser.parse_args()
-    
+
     # Merge positional and flag versions of drivers_dir
     drivers_dir = args.drivers_dir or args.drivers_dir_flag
-    
+
     # Smart defaults for outputs
     json_output = args.json_output or ("" if args.no_json else "triage_results.json")
     report_output = args.report or ("" if args.no_report else "triage_report.md")
-    
+
     # --explain can work with existing JSON results (no scan needed)
     if args.explain and not drivers_dir and not args.single:
         json_candidates = [
@@ -896,14 +935,28 @@ def main():
                 return
         print("ERROR: No triage_results.json found. Run a scan first or specify --json-output.")
         return
-    
+
     if not drivers_dir and not args.single:
         parser.error("Must specify a drivers directory or --single")
-    
+
     # Auto-detect Ghidra
-    ghidra_path = args.ghidra or detect_ghidra()
+    requested_ghidra_path = args.ghidra
+    ghidra_path = (
+        resolve_ghidra_install(requested_ghidra_path)
+        if requested_ghidra_path
+        else detect_ghidra()
+    )
     if not ghidra_path:
-        parser.error("Could not find Ghidra. Set GHIDRA_HOME env var or use --ghidra")
+        if requested_ghidra_path:
+            parser.error(
+                f"Invalid Ghidra path: {requested_ghidra_path}. Point --ghidra "
+                "at the Ghidra install or its parent folder (the install must "
+                "contain support\\analyzeHeadless.bat or support\\pyghidraRun.bat)."
+            )
+        parser.error(
+            "Could not find Ghidra. Set GHIDRA_HOME to the Ghidra install or "
+            "its parent folder, or use --ghidra."
+        )
 
     # Validate Ghidra path
     headless, _, headless_name = get_ghidra_headless_launcher(ghidra_path)
@@ -912,21 +965,21 @@ def main():
 
     # Auto-detect worker count
     workers = args.workers if args.workers > 0 else detect_cpu_count()
-    
+
     # Prefilter is ON by default now
     use_prefilter = not args.no_prefilter
-    
+
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "driver_triage.py")
-    
+
     if not os.path.exists(script_path):
         print(f"ERROR: Triage script not found at {script_path}")
         sys.exit(1)
-    
+
     print(f"Ghidra: {ghidra_path} ({headless_name})")
     print(f"Workers: {workers}")
     print(f"Pre-filter: {'on' if use_prefilter else 'off'}")
     print()
-    
+
     # Find drivers
     if args.single:
         drivers = [args.single]
@@ -942,11 +995,11 @@ def main():
         else:
             print(f"Scanning {drivers_dir} for .sys files...")
             drivers = find_sys_files(drivers_dir)
-    
+
     if not drivers:
         print("No .sys files found!")
         sys.exit(1)
-    
+
     # Running-only filter (default ON, --all to override)
     if args.running_only and not args.all and not args.single:
         running = get_running_drivers()
@@ -955,22 +1008,22 @@ def main():
             if not drivers:
                 print("No running drivers matched! Use --all to scan everything.")
                 sys.exit(1)
-    
+
     if args.max > 0:
         drivers = drivers[:args.max]
-    
+
     print(f"🌳 Cthaeh sees {len(drivers)} driver(s)\n")
-    
+
     # Create temp project directory for Ghidra
     project_dir = tempfile.mkdtemp(prefix="cthaeh_")
-    
+
     start_time = time.time()
-    
+
     # Run analysis
     results = run_analysis(drivers, ghidra_path, script_path, project_dir, workers, json_output)
-    
+
     elapsed = time.time() - start_time
-    
+
     if results:
         write_csv(results, args.output)
         if json_output:
@@ -1023,9 +1076,9 @@ def main():
             if top:
                 print(f"\n--- Auto-explain: top scorer ---")
                 explain_driver(results, top[0].get("driver", {}).get("name", ""))
-    
+
     print(f"\nCompleted in {elapsed:.1f}s ({elapsed/max(len(drivers),1):.1f}s per driver)")
-    
+
     # Cleanup
     try:
         import shutil
