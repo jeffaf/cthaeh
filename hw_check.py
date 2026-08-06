@@ -81,7 +81,7 @@ def enumerate_hardware(powershell_cmd=None):
         )
         if result.returncode != 0:
             print(f"WARNING: PnP enumeration failed: {result.stderr.strip()}")
-            return None
+            return _enumerate_hardware_pnputil()
 
         devices_raw = json.loads(result.stdout)
         if isinstance(devices_raw, dict):
@@ -89,10 +89,10 @@ def enumerate_hardware(powershell_cmd=None):
 
     except subprocess.TimeoutExpired:
         print("WARNING: PnP enumeration timed out")
-        return None
+        return _enumerate_hardware_pnputil()
     except json.JSONDecodeError as e:
         print(f"WARNING: Failed to parse PnP output: {e}")
-        return None
+        return _enumerate_hardware_pnputil()
 
     # Now get hardware IDs for each device (separate query since Select doesn't include HardwareID)
     ps_hwid_script = (
@@ -146,6 +146,69 @@ def enumerate_hardware(powershell_cmd=None):
         for hwid in hw_ids:
             all_hardware_ids.add(hwid.upper())
 
+    return {
+        "hardware_ids": all_hardware_ids,
+        "instance_ids": all_instance_ids,
+        "devices": devices,
+        "device_count": len(devices),
+    }
+
+
+def _enumerate_hardware_pnputil():
+    """Non-admin fallback using the inbox PnP utility and device properties."""
+    try:
+        result = subprocess.run(
+            ["pnputil", "/enum-devices", "/connected", "/properties"],
+            capture_output=True, text=True, timeout=60
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    parsed = _parse_pnputil_devices(result.stdout)
+    if parsed is not None:
+        print("Hardware check: using pnputil fallback.")
+    return parsed
+
+
+def _parse_pnputil_devices(output):
+    """Parse English pnputil /enum-devices /connected /properties output."""
+    devices = []
+    all_hardware_ids = set()
+    all_instance_ids = set()
+
+    for block in re.split(r"(?=Instance ID:\s*)", output, flags=re.IGNORECASE):
+        instance_match = re.search(r"^Instance ID:\s*(.+)$", block,
+                                   flags=re.IGNORECASE | re.MULTILINE)
+        if not instance_match:
+            continue
+        instance_id = instance_match.group(1).strip()
+        description = re.search(r"^Device Description:\s*(.*)$", block,
+                                flags=re.IGNORECASE | re.MULTILINE)
+        class_name = re.search(r"^Class Name:\s*(.*)$", block,
+                               flags=re.IGNORECASE | re.MULTILINE)
+
+        hw_ids = []
+        hw_section = re.search(
+            r"DEVPKEY_Device_HardwareIds\s+\[String List\]:\s*\r?\n"
+            r"((?:\s{8}\S.*(?:\r?\n|$))+)",
+            block, flags=re.IGNORECASE
+        )
+        if hw_section:
+            hw_ids = [line.strip() for line in hw_section.group(1).splitlines()
+                      if line.strip()]
+
+        devices.append({
+            "friendly_name": description.group(1).strip() if description else "",
+            "instance_id": instance_id,
+            "class": class_name.group(1).strip() if class_name else "",
+            "hardware_ids": hw_ids,
+        })
+        all_instance_ids.add(instance_id.upper())
+        all_hardware_ids.update(hwid.upper() for hwid in hw_ids)
+
+    if not devices:
+        return None
     return {
         "hardware_ids": all_hardware_ids,
         "instance_ids": all_instance_ids,
@@ -257,7 +320,7 @@ def check_hardware_presence(driver_names, hw_info=None, driver_hw_map=None, powe
             'status': 'HARDWARE_PRESENT' | 'HARDWARE_ABSENT' | 'UNKNOWN',
             'matched_device': friendly name if present,
             'inf_hardware_ids': list of HW IDs from INF,
-            'score_adjustment': int
+            'score_adjustment': 0 (retained for output compatibility)
         }
     """
     if powershell_cmd is None:
@@ -285,6 +348,7 @@ def check_hardware_presence(driver_names, hw_info=None, driver_hw_map=None, powe
                 "reason": "no INF hardware IDs found for this driver",
                 "inf_hardware_ids": [],
                 "score_adjustment": 0,
+                "local_applicability": "UNKNOWN",
             }
             continue
 
@@ -305,13 +369,17 @@ def check_hardware_presence(driver_names, hw_info=None, driver_hw_map=None, powe
                 "matched_hardware_ids": list(matched_ids)[:3],  # top 3 for brevity
                 "inf_hardware_ids": list(inf_hw_ids)[:5],
                 "score_adjustment": 0,  # no penalty when hardware is present
+                "local_applicability": "APPLICABLE",
             }
         else:
             results[driver_name] = {
                 "status": "HARDWARE_ABSENT",
                 "reason": "no matching PnP hardware found on this system",
                 "inf_hardware_ids": list(inf_hw_ids)[:5],
-                "score_adjustment": -20,  # penalty in audit mode
+                # Hardware presence is host-specific actionability context, not
+                # evidence that the binary is more or less likely vulnerable.
+                "score_adjustment": 0,
+                "local_applicability": "NOT_APPLICABLE",
             }
 
     return results
@@ -322,7 +390,8 @@ def augment_triage_results(results_path, research_mode=False, output_path=None, 
 
     Args:
         results_path: path to triage_results.json
-        research_mode: if True, hardware_absent is informational only (no score penalty)
+        research_mode: deprecated compatibility flag; hardware never changes
+            the intrinsic research score
         output_path: where to write augmented results (default: overwrite input)
         driverstore_path: path to DriverStore FileRepository (default: standard Windows path)
     """
@@ -369,40 +438,17 @@ def augment_triage_results(results_path, research_mode=False, output_path=None, 
 
         hw = hw_results[name]
         r["hardware_check"] = hw
+        r["local_applicability"] = hw.get("local_applicability", "UNKNOWN")
 
         if hw["status"] == "HARDWARE_PRESENT":
             present_count += 1
         elif hw["status"] == "HARDWARE_ABSENT":
             absent_count += 1
-            # Apply score adjustment in audit mode
-            if not research_mode:
-                adjustment = hw.get("score_adjustment", 0)
-                if adjustment != 0:
-                    r["score"] = r.get("score", 0) + adjustment
-                    r.setdefault("findings", []).append({
-                        "check": "hardware_presence",
-                        "score": adjustment,
-                        "detail": f"Hardware absent on this system ({hw.get('reason', '')})",
-                    })
-                    # Recalculate priority after adjustment
-                    score = r["score"]
-                    if score >= 250:
-                        r["priority"] = "CRITICAL"
-                    elif score >= 150:
-                        r["priority"] = "HIGH"
-                    elif score >= 75:
-                        r["priority"] = "MEDIUM"
-                    elif score >= 30:
-                        r["priority"] = "LOW"
-                    else:
-                        r["priority"] = "SKIP"
-            else:
-                # Research mode: informational only
-                r.setdefault("findings", []).append({
-                    "check": "hardware_presence",
-                    "score": 0,
-                    "detail": f"Hardware absent on this system (informational - research mode)",
-                })
+            r.setdefault("findings", []).append({
+                "check": "hardware_presence",
+                "score": 0,
+                "detail": "Hardware absent on this system; intrinsic research score unchanged",
+            })
         else:
             unknown_count += 1
 
@@ -418,10 +464,8 @@ def augment_triage_results(results_path, research_mode=False, output_path=None, 
     print(f"  PRESENT:  {present_count} drivers (hardware found)")
     print(f"  ABSENT:   {absent_count} drivers (no hardware)")
     print(f"  UNKNOWN:  {unknown_count} drivers (no INF mapping)")
-    if not research_mode and absent_count:
-        print(f"  Score adjustment: -{20} applied to {absent_count} absent drivers")
-    elif research_mode and absent_count:
-        print(f"  Research mode: no score adjustment applied")
+    if absent_count:
+        print("  Intrinsic scores unchanged; hardware status affects local actionability only")
     print(f"  Results written to: {out}")
 
     return results
@@ -436,7 +480,7 @@ def main():
     parser.add_argument("--list-hardware", action="store_true",
                         help="Just list present PnP hardware")
     parser.add_argument("--research", action="store_true",
-                        help="Research mode: hardware_absent is informational only (no score penalty)")
+                        help="Deprecated compatibility flag; hardware status is always informational")
     parser.add_argument("--output", help="Output path (default: overwrite input)")
     parser.add_argument("--driverstore",
                         default=DRIVERSTORE_PATH,

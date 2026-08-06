@@ -226,6 +226,44 @@ reducers.
 
 ## P4 - Documentation
 
+### 14. Research priority was presented as local exploit urgency
+
+The report previously rendered every CRITICAL score as "IMMEDIATE - full
+reverse engineering, build PoC exploit," even when no matching hardware or
+device object had been checked. Hardware absence also subtracted only 20 points
+from the same intrinsic score, conflating two different questions: whether a
+binary deserves research and whether this host exposes it.
+
+**Status:** actioned. Reports now label the tier **Research Priority**, give a
+separate reachability-aware next step, and never prescribe exploit development
+from static heuristics alone. Hardware checks preserve the intrinsic score but
+hard-exclude proven-absent drivers from local summaries, top-candidate reports,
+device checks, and auto-explain. README/REFERENCE define these semantics.
+
+### 15. Loaded-driver filtering included stopped services and failed open
+
+`driverquery /v` rows were accepted without checking the State column. If
+`driverquery` failed, the default scan silently continued across the entire
+corpus. This made stopped Driver Store artifacts look like active local attack
+surface (the stale `athw8x.sys` package on the review host exposed the bug).
+
+**Status:** actioned. Driverquery results now require `State=Running`; an
+`sc.exe` + service `ImagePath` fallback handles systems where driverquery fails.
+If both methods fail, loaded-only mode stops and requires explicit `--all`.
+
+### 16. Enrichment labels overstated version-specific evidence
+
+The report called name-family matches "Prior CVEs," which reads as if the exact
+binary/version was affected. It also placed "Driver Class: CRITICAL" beside the
+score tier, making a structural raw-WDM classification look like a second
+vulnerability verdict.
+
+**Status:** actioned for presentation. Reports now say **Related Family CVEs**
+and **Attack-Surface Class**. CNA/bounty and family-CVE weights remain weak,
+additive priors. They should not be retuned without the labeled corpus and
+baseline process described in findings #1-2; bounty availability in particular
+describes reportability more directly than bug likelihood.
+
 ### 11. Undocumented CLI flags and env vars (FIXED in this review)
 `REFERENCE.md` was missing `--single`, `--explain`, `--ghidra`, `--max`, `--prefilter-min`,
 `--output`, `--json-output`, `--report`, `--min-tier`, and `--drivers-dir`, plus the

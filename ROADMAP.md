@@ -66,6 +66,10 @@ is a two-line change; the eval will pick it up on the next run.
 - YAML scoring rules are externalized in `scoring_rules.yaml`.
 - Known investigated drivers are tracked in `investigated.json`.
 - Markdown/JSON/CSV output exists, plus explain mode.
+- Intrinsic research priority is separated from host exposure: stopped drivers
+  are excluded from the default scan, hardware absence is informational, and
+  hardware-absent binaries are excluded from actionable local rankings while
+  remaining in JSON/CSV for traceability.
 
 ## v5 Focus
 

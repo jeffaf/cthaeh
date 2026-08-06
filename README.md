@@ -9,6 +9,10 @@ ranking and evidence collection tool for driver attack surface, dangerous
 kernel primitives, validation gaps, BYOVD utility, vendor context, and prior
 CVE history.
 
+A score is an **intrinsic research priority**, not a claim that a driver is
+vulnerable or reachable on the current host. Installed, loaded, hardware-backed,
+and user-accessible are separate facts and are reported separately.
+
 ## Sample Output
 
 ```text
@@ -23,10 +27,10 @@ CVE history.
 
 Top targets (>= HIGH):
 
-   1. [CRITICAL] 360 pts  athw8x.sys
-   2. [CRITICAL] 310 pts  vhdmp.sys
-   3. [HIGH    ] 245 pts  vmci.sys
-   4. [HIGH    ] 240 pts  hvservice.sys
+   1. [CRITICAL] 360 pts  candidate_a.sys
+   2. [CRITICAL] 310 pts  candidate_b.sys
+   3. [HIGH    ] 245 pts  candidate_c.sys
+   4. [HIGH    ] 240 pts  candidate_d.sys
 ```
 
 ## Quick Start
@@ -58,9 +62,9 @@ You can also set `CTHAEH_DTA_SHA256` in the environment.
 1. Extract a candidate corpus from DriverStore.
 2. Run the pre-filter to keep obvious low-signal drivers out of Ghidra.
 3. Run Ghidra headless analysis in parallel.
-4. Review HIGH and CRITICAL drivers first.
-5. Use `--explain` to inspect why a driver ranked highly.
-6. Validate device accessibility and hardware presence when relevant.
+4. Use `--explain` to inspect why a driver ranked highly.
+5. Validate load state, hardware presence, and device accessibility.
+6. Review locally reachable HIGH and CRITICAL drivers first.
 7. Record completed work in `investigated.json` so known results are skipped.
 
 ```text
@@ -71,14 +75,22 @@ DriverStore -> extract -> running-only -> pre-filter -> Cthaeh -> ranked list ->
 
 | Tier | Threshold | Action |
 |------|-----------|--------|
-| CRITICAL | >= 250 | Analyze immediately |
-| HIGH | >= 150 | Investigate soon |
+| CRITICAL | >= 250 | Validate exposure, then prioritize manual audit |
+| HIGH | >= 150 | Validate exposure, then investigate |
 | MEDIUM | >= 75 | Worth a look |
 | LOW | >= 30 | Park unless new context appears |
 | SKIP | < 30 | Deprioritize |
 
 Thresholds and weights live in `scoring_rules.yaml`. Treat threshold changes as
 calibration events, not one-off edits.
+
+The default Windows scan is loaded-driver-only. It now fails closed if Windows
+cannot enumerate loaded drivers. `--all` is an explicit corpus/research mode and
+may include stopped services, unused Driver Store packages, and drivers for
+hardware that is not present. Pair it with `--hw-check`; hardware status never
+changes the intrinsic research score, but hardware-absent drivers are excluded
+from local summaries, top-candidate reports, device checks, and auto-explain.
+Their full results remain in JSON/CSV for traceability.
 
 ## Useful Commands
 
@@ -89,8 +101,8 @@ python run_triage.py C:\drivers
 # Scan every driver in the directory
 python run_triage.py C:\drivers --all
 
-# Include post-triage hardware and device DACL checks
-python run_triage.py C:\drivers --hw-check --device-check
+# Full Driver Store research scan with host exposure context
+python run_triage.py C:\drivers --all --hw-check --device-check
 
 # Generate a calibration report from prior results
 # Reports precision@K, recall@HIGH, and fp_leakage — the outcome metrics

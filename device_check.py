@@ -385,7 +385,13 @@ def augment_triage_results(results_path, min_score=0, output_path=None):
         score = r.get("score", 0)
         name = r.get("driver", {}).get("name", "")
         priority = r.get("priority", "")
-        if name and score >= min_score and priority not in ("INVESTIGATED", "SKIP"):
+        hardware_absent = (
+            r.get("local_applicability") == "NOT_APPLICABLE"
+            or r.get("hardware_check", {}).get("status") == "HARDWARE_ABSENT"
+        )
+        if (name and score >= min_score
+                and priority not in ("INVESTIGATED", "SKIP")
+                and not hardware_absent):
             drivers_to_check.append((name, r))
 
     if not drivers_to_check:

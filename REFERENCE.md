@@ -13,7 +13,7 @@ Detailed technical reference. For quick start and overview, see [README.md](READ
 | **Validation gaps** | No ProbeForRead/Write, no auth imports, unchecked memcpy | Missing input validation |
 | **USB/BT** | URB construction, HCI passthrough, eFuse access | Hardware control passthrough |
 | **Firmware** | UEFI variables, HAL bus data, hardcoded crypto keys | Firmware manipulation |
-| **Vendor context** | CNA status, bounty programs, driver class ranking | Vuln assignment likelihood |
+| **Vendor context** | CNA status, bounty programs, driver class ranking | Weak research/reporting prior; not local exploitability |
 | **Compound scoring** | MSR+PhysMem=god-mode, IOCTL+no-auth+named-device=easy target | Multi-primitive combinations |
 | **Kernel Rhabdomancer** | Per-function candidate point mapping, call graph from IOCTL dispatch | Pinpoints *where* dangerous APIs are called |
 | **Vuln pattern** | IOCTL surface + dangerous primitive + missing validation | Pattern from 8 confirmed vulns |
@@ -42,6 +42,34 @@ Findings are tagged with KernelSight anti-patterns (AP1-AP6):
 | AP5 | No IOCTL auth / open device ACLs | Easy targets |
 | AP6 | Double-fetch / TOCTOU on user buffers | Race conditions |
 
+## Score and Exposure Semantics
+
+`score` and `priority` describe the binary's intrinsic manual-audit priority.
+They do not establish a vulnerability and do not say whether the driver is
+usable on the current machine.
+
+Host context is orthogonal:
+
+- **Loaded state**: the default Windows scan includes only running driver
+  services. Enumeration failure is fatal unless the operator explicitly uses
+  `--all`.
+- **Hardware presence**: `--hw-check` records whether a matching PnP device is
+  present. It does not alter the intrinsic score, but a proven-absent driver is
+  not locally applicable and is removed from actionable rankings and follow-up.
+- **Device access**: `--device-check` records whether a reachable device object
+  appears open to users, administrators, or nobody. This is attackability
+  evidence and should be reviewed before deep analysis.
+
+Consequently, a CRITICAL driver with absent hardware remains in JSON/CSV for
+traceability but is omitted from the local summary, top-candidate Markdown,
+device checks, and auto-explain. A static CRITICAL result is a prompt to validate
+findings and reachability, not an instruction to build an exploit.
+
+“Related Family CVEs” are enrichment matched by driver-name family. They are a
+historical prior, not evidence that the scanned version is affected by those
+CVEs. Likewise, “Attack-Surface Class: CRITICAL” is the structural class of the
+driver (for example, raw WDM), not a second vulnerability verdict.
+
 ## Research Feeds
 
 | Source | Why it matters |
@@ -62,7 +90,7 @@ Findings are tagged with KernelSight anti-patterns (AP1-AP6):
 | `--hw-check` | OFF | Post-triage hardware presence check |
 | `--device-check` | OFF | Post-triage device DACL check |
 | `--device-check-min-score` | 75 | Min score for device check |
-| `--research` | OFF | hardware_absent is informational only |
+| `--research` | OFF | Deprecated compatibility flag; hardware status is always informational |
 | `--workers N` | auto | Parallel Ghidra instances (auto = half CPUs) |
 | `--max N` | 0 | Cap number of drivers analyzed (0 = all) |
 | `--no-prefilter` | OFF | Disable pefile pre-filter |

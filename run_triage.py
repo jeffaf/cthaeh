@@ -24,6 +24,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -104,21 +105,39 @@ def configure_console_output():
 
 
 def get_tier_recommendation(tier, has_hardware=None, has_device_access=None):
-    """Return actionable next-step recommendation based on score tier."""
+    """Return a next step without confusing static score with local exposure."""
+    if has_hardware is False:
+        return "not locally exposed; retain as a research candidate or acquire matching hardware"
+    if has_device_access == "no_device":
+        return "no reachable device object found; validate load state and alternate interfaces"
+    if has_device_access == "admin_only":
+        return "admin-only device; validate whether that access boundary matches the threat model"
     if tier == "CRITICAL":
-        return "IMMEDIATE - full reverse engineering, build PoC exploit"
+        if has_hardware is True and has_device_access in ("everyone", "users"):
+            return "validate the findings, then prioritize manual reverse engineering and a minimal reproducer"
+        return "validate hardware and device reachability, then prioritize manual reverse engineering"
     elif tier == "HIGH":
-        if has_hardware is False:
-            return "needs hardware acquisition or remote target"
-        if has_device_access == "admin_only":
-            return "needs device node discovery or ACL bypass"
-        return "needs device node discovery"
+        return "validate device reachability, then investigate the highest-confidence paths"
     elif tier == "MEDIUM":
         return "worth a deeper look - check IOCTL surface manually"
     elif tier == "LOW":
         return "park for now, revisit if attack surface expands"
     else:
         return "skip unless new information surfaces"
+
+
+def clean_version_summary(value):
+    """Remove Ghidra/Jython unicode-repr prefixes from version-resource text."""
+    if not value:
+        return ""
+    return re.sub(r'(^|\|\s*)u["\']', r'\1', str(value)).strip()
+
+
+def is_hardware_absent(result):
+    """Return True when host enrichment proves the backing hardware is absent."""
+    if result.get("local_applicability") == "NOT_APPLICABLE":
+        return True
+    return result.get("hardware_check", {}).get("status") == "HARDWARE_ABSENT"
 
 
 def load_enrichment_data():
@@ -171,8 +190,8 @@ def match_cve_family(driver_name, driver_cves):
 def get_running_drivers():
     """Get list of currently loaded driver filenames on Windows.
     
-    Uses 'driverquery /fo csv' to enumerate running drivers, then extracts
-    the module names. Returns a set of lowercase .sys filenames.
+    Uses ``driverquery`` first and ``sc.exe`` as a fallback. Only entries whose
+    state is RUNNING are returned; installed or stopped services are excluded.
     
     Returns None if not on Windows or command fails.
     """
@@ -185,44 +204,46 @@ def get_running_drivers():
             ["driverquery", "/fo", "csv", "/v"],
             capture_output=True, text=True, timeout=30
         )
-        if result.returncode != 0:
-            print(f"WARNING: driverquery failed: {result.stderr.strip()}")
-            return None
-        
-        running = set()
-        lines = result.stdout.strip().split("\n")
-        if len(lines) < 2:
-            return None
-        
-        # Parse CSV header to find the module name column
-        import csv as csv_mod
-        reader = csv_mod.reader(lines)
-        header = next(reader)
-        
-        # Find the "Module Name" column (or similar)
-        module_col = None
-        path_col = None
-        for idx, col in enumerate(header):
-            col_clean = col.strip().strip('"').lower()
-            if "module name" in col_clean:
-                module_col = idx
-            elif "path" in col_clean:
-                path_col = idx
-        
-        if module_col is None:
-            # Fallback: first column is usually module name
-            module_col = 0
-        
-        for row in reader:
-            if len(row) > module_col:
-                module_name = row[module_col].strip().strip('"').lower()
-                if module_name:
-                    # driverquery gives module names without .sys sometimes
-                    if not module_name.endswith(".sys"):
-                        module_name += ".sys"
-                    running.add(module_name)
-        
-        return running
+        if result.returncode == 0:
+            running = _parse_driverquery_running(result.stdout)
+            if running is not None:
+                return running
+        else:
+            detail = (result.stderr or result.stdout).strip()
+            print(f"WARNING: driverquery failed: {detail}")
+
+        # driverquery can fail on some Windows builds with access/version
+        # errors. The service controller still exposes stable numeric states.
+        sc_result = subprocess.run(
+            ["sc.exe", "query", "type=", "driver", "state=", "all",
+             "bufsize=", "200000"],
+            capture_output=True, text=True, timeout=30
+        )
+        if sc_result.returncode == 0:
+            running_services = _parse_sc_running_services(sc_result.stdout)
+            if running_services:
+                reg_result = subprocess.run(
+                    ["reg.exe", "query",
+                     r"HKLM\SYSTEM\CurrentControlSet\Services", "/s", "/v", "ImagePath"],
+                    capture_output=True, text=True, timeout=30
+                )
+                running = set()
+                mapped_services = set()
+                if reg_result.returncode == 0:
+                    running, mapped_services = _parse_service_image_paths(
+                        reg_result.stdout, running_services
+                    )
+                # Most service names equal their image basename. Retain that
+                # fallback for services lacking a readable ImagePath.
+                for service in running_services - mapped_services:
+                    running.add(service if service.endswith(".sys")
+                                else service + ".sys")
+                print("Running-driver filter: using sc.exe fallback.")
+                return running
+
+        detail = (sc_result.stderr or sc_result.stdout).strip()
+        print(f"WARNING: sc.exe driver enumeration failed: {detail}")
+        return None
         
     except FileNotFoundError:
         print("WARNING: driverquery not found. Not on Windows?")
@@ -233,6 +254,77 @@ def get_running_drivers():
     except Exception as e:
         print(f"WARNING: Failed to get running drivers: {e}")
         return None
+
+
+def _parse_driverquery_running(output):
+    """Parse driverquery CSV and return only rows explicitly marked Running."""
+    import csv as csv_mod
+
+    lines = output.strip().splitlines()
+    if len(lines) < 2:
+        return None
+    reader = csv_mod.reader(lines)
+    header = next(reader)
+    normalized = [col.strip().strip('"').lower() for col in header]
+    module_col = next((i for i, col in enumerate(normalized)
+                       if "module name" in col), 0)
+    state_col = next((i for i, col in enumerate(normalized)
+                      if col == "state"), None)
+    if state_col is None:
+        return None
+
+    running = set()
+    for row in reader:
+        if len(row) <= max(module_col, state_col):
+            continue
+        if row[state_col].strip().lower() != "running":
+            continue
+        module_name = row[module_col].strip().strip('"').lower()
+        if module_name:
+            running.add(module_name if module_name.endswith(".sys")
+                        else module_name + ".sys")
+    return running
+
+
+def _parse_sc_running(output):
+    """Parse ``sc query`` output into likely filenames (test/helper wrapper)."""
+    return {name if name.endswith(".sys") else name + ".sys"
+            for name in _parse_sc_running_services(output)}
+
+
+def _parse_sc_running_services(output):
+    """Parse ``sc query`` output using the locale-independent state number 4."""
+    running = set()
+    for block in re.split(r"(?=SERVICE_NAME:\s*)", output, flags=re.IGNORECASE):
+        service = re.search(r"SERVICE_NAME:\s*(\S+)", block, flags=re.IGNORECASE)
+        state = re.search(r"STATE\s*:\s*(\d+)", block, flags=re.IGNORECASE)
+        if service and state and state.group(1) == "4":
+            running.add(service.group(1).lower())
+    return running
+
+
+def _parse_service_image_paths(output, running_services):
+    """Map running service keys to the actual .sys basename in ImagePath."""
+    running_services = {name.lower() for name in running_services}
+    files = set()
+    mapped_services = set()
+    current_service = None
+    key_prefix = "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\"
+
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith(key_prefix.lower()):
+            remainder = stripped[len(key_prefix):]
+            current_service = remainder.split("\\", 1)[0].lower()
+            continue
+        if current_service not in running_services or "ImagePath" not in line:
+            continue
+        match = re.search(r"([^\\\s\"]+\.sys)(?:\s|$)", line, flags=re.IGNORECASE)
+        if match:
+            files.add(match.group(1).lower())
+            mapped_services.add(current_service)
+
+    return files, mapped_services
 
 
 def filter_running_drivers(sys_files, running_drivers):
@@ -487,7 +579,7 @@ def write_csv(results, output_path):
     with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
-            "Priority", "Score", "Driver", "Class", "Path", "Size",
+            "Priority", "Score", "Local Applicability", "Driver", "Class", "Path", "Size",
             "Functions", "Findings", "Top Checks"
         ])
         
@@ -504,6 +596,8 @@ def write_csv(results, output_path):
             writer.writerow([
                 r.get("priority", "?"),
                 r.get("score", 0),
+                "NOT_APPLICABLE" if is_hardware_absent(r)
+                else r.get("local_applicability", "UNKNOWN"),
                 driver.get("name", "?"),
                 driver_cls,
                 driver.get("path", "?"),
@@ -522,11 +616,13 @@ def print_summary(results, min_tier="HIGH"):
     min_tier_idx = tier_order.index(min_tier) if min_tier in tier_order else 1
 
     total = len(results)
-    critical = sum(1 for r in results if r.get("priority") == "CRITICAL")
-    high = sum(1 for r in results if r.get("priority") == "HIGH")
-    medium = sum(1 for r in results if r.get("priority") == "MEDIUM")
-    low = sum(1 for r in results if r.get("priority") == "LOW")
-    skip = sum(1 for r in results if r.get("priority") == "SKIP")
+    absent = sum(1 for r in results if is_hardware_absent(r))
+    applicable = [r for r in results if not is_hardware_absent(r)]
+    critical = sum(1 for r in applicable if r.get("priority") == "CRITICAL")
+    high = sum(1 for r in applicable if r.get("priority") == "HIGH")
+    medium = sum(1 for r in applicable if r.get("priority") == "MEDIUM")
+    low = sum(1 for r in applicable if r.get("priority") == "LOW")
+    skip = sum(1 for r in applicable if r.get("priority") == "SKIP")
     
     print(f"\n{'='*60}")
     print(f"  🌳 CTHAEH TRIAGE COMPLETE: {total} drivers analyzed")
@@ -536,11 +632,13 @@ def print_summary(results, min_tier="HIGH"):
     print(f"  🟡 MEDIUM priority: {medium}")
     print(f"  🟢 LOW priority:    {low}")
     print(f"  ⚪ SKIP:            {skip}")
+    if absent:
+        print(f"  -- NOT APPLICABLE:  {absent} (hardware absent)")
     print()
     
-    results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    applicable.sort(key=lambda x: x.get("score", 0), reverse=True)
     # Filter to min_tier and above
-    filtered = [r for r in results
+    filtered = [r for r in applicable
                 if r.get("priority", "SKIP") in tier_order[:min_tier_idx + 1]]
     if filtered:
         tier_label = f" (>= {min_tier})" if min_tier != "SKIP" else ""
@@ -549,7 +647,7 @@ def print_summary(results, min_tier="HIGH"):
         for i, r in enumerate(filtered[:20], 1):
             driver = r.get("driver", {})
             print(f"  {i:2d}. [{r.get('priority', '?'):8s}] {r.get('score', 0):3d} pts  {driver.get('name', '?')}")
-    elif results:
+    elif applicable:
         print(f"No drivers at {min_tier} tier or above. Use --min-tier MEDIUM to see more.")
 
 
@@ -620,12 +718,14 @@ def write_report(results, output_path, top_n=20):
     cna_vendors, driver_cves = load_enrichment_data()
     
     total = len(results)
-    critical = sum(1 for r in results if r.get("priority") == "CRITICAL")
-    high = sum(1 for r in results if r.get("priority") == "HIGH")
-    medium = sum(1 for r in results if r.get("priority") == "MEDIUM")
-    low = sum(1 for r in results if r.get("priority") == "LOW")
-    skip = sum(1 for r in results if r.get("priority") == "SKIP")
-    investigated_count = sum(1 for r in results if r.get("priority") == "INVESTIGATED")
+    absent_count = sum(1 for r in results if is_hardware_absent(r))
+    candidates = [r for r in results if not is_hardware_absent(r)]
+    critical = sum(1 for r in candidates if r.get("priority") == "CRITICAL")
+    high = sum(1 for r in candidates if r.get("priority") == "HIGH")
+    medium = sum(1 for r in candidates if r.get("priority") == "MEDIUM")
+    low = sum(1 for r in candidates if r.get("priority") == "LOW")
+    skip = sum(1 for r in candidates if r.get("priority") == "SKIP")
+    investigated_count = sum(1 for r in candidates if r.get("priority") == "INVESTIGATED")
     
     PRIORITY_EMOJI = {
         "CRITICAL": "💀", "HIGH": "🔴", "MEDIUM": "🟡",
@@ -647,17 +747,19 @@ def write_report(results, output_path, top_n=20):
     lines.append(f"- ⚪ SKIP: {skip}")
     if investigated_count:
         lines.append(f"- 🚫 Investigated: {investigated_count}")
+    if absent_count:
+        lines.append(f"- -- Not applicable on this host (hardware absent): {absent_count}")
     lines.append("")
-    lines.append(f"## Top {top_n} Candidates")
+    lines.append(f"## Top {top_n} Locally Applicable Candidates")
     lines.append("")
     
-    for i, r in enumerate(results[:top_n], 1):
+    for i, r in enumerate(candidates[:top_n], 1):
         driver = r.get("driver", {})
         name = driver.get("name", "unknown")
         score = r.get("score", 0)
         priority = r.get("priority", "?")
         emoji = PRIORITY_EMOJI.get(priority, "❓")
-        version_summary = driver.get("version_summary", "")
+        version_summary = clean_version_summary(driver.get("version_summary", ""))
         skip_reason = r.get("skip_reason", "")
         
         # Build enhanced driver header with version
@@ -699,12 +801,12 @@ def write_report(results, output_path, top_n=20):
             cve_examples = ", ".join(c["id"] for c in cves[:3])
             if cve_count > 3:
                 cve_examples += f", +{cve_count - 3} more"
-            lines.append(f"**Prior CVEs:** {cve_count} ({cve_examples})")
+            lines.append(f"**Related Family CVEs:** {cve_count} ({cve_examples})")
         
         # Driver class
         dc = r.get("driver_class", {})
         if dc and dc.get("class", "UNKNOWN") != "UNKNOWN":
-            lines.append(f"**Driver Class:** {dc['class']} ({dc.get('category', '')})")
+            lines.append(f"**Attack-Surface Class:** {dc['class']} ({dc.get('category', '')})")
         
         lines.append(f"**Size:** {driver.get('size', 0):,} bytes | **Functions:** {driver.get('function_count', 0)}")
         
@@ -741,7 +843,8 @@ def write_report(results, output_path, top_n=20):
         # Actionable recommendation based on score tier
         tier = get_score_tier(score)
         recommendation = get_tier_recommendation(tier, hw_present, device_access)
-        lines.append(f"**Priority:** {tier} - {recommendation}")
+        lines.append(f"**Research Priority:** {tier}")
+        lines.append(f"**Next Step:** {recommendation}")
         lines.append("")
 
         # Group findings by score (high to low), skip zero-score
@@ -788,7 +891,7 @@ def explain_driver(results, driver_name):
     score = match.get("score", 0)
     version_str = ""
     if d.get("version_summary"):
-        version_str = f" {d['version_summary']}"
+        version_str = f" {clean_version_summary(d['version_summary'])}"
     
     print(f"\n{'='*60}")
     print(f"  Driver: {name}{version_str}")
@@ -814,14 +917,14 @@ def explain_driver(results, driver_name):
         cve_examples = ", ".join(c["id"] for c in cves[:3])
         if len(cves) > 3:
             cve_examples += f", +{len(cves) - 3} more"
-        print(f"  Prior CVEs: {len(cves)} ({cve_examples})")
+        print(f"  Related Family CVEs: {len(cves)} ({cve_examples})")
     
     print(f"  Score: {score} | Priority: {match.get('priority', '?')}")
     print(f"  Size: {d.get('size', 0):,} bytes | Functions: {d.get('function_count', 0)}")
     
     dc = match.get("driver_class", {})
     if dc and dc.get("class", "UNKNOWN") != "UNKNOWN":
-        print(f"  Driver Class: {dc['class']} ({dc.get('category', '')})")
+        print(f"  Attack-Surface Class: {dc['class']} ({dc.get('category', '')})")
     
     hw = match.get("hardware_check", {})
     hw_present = None
@@ -843,7 +946,8 @@ def explain_driver(results, driver_name):
     # Actionable recommendation
     tier = get_score_tier(score)
     recommendation = get_tier_recommendation(tier, hw_present, device_access)
-    print(f"  Priority: {tier} - {recommendation}")
+    print(f"  Research Priority: {tier}")
+    print(f"  Next Step: {recommendation}")
     print()
     
     findings = match.get("findings", [])
@@ -970,7 +1074,7 @@ def main():
     parser.add_argument("--device-check-min-score", type=int, default=75,
                         help="Min score for device check (default: 75)")
     parser.add_argument("--research", action="store_true",
-                        help="Research mode: hardware_absent is informational only")
+                        help="Deprecated compatibility flag; hardware status is always informational")
     parser.add_argument("--running-only", action="store_true", default=True,
                         help="Only scan currently loaded drivers (default: True, Windows only)")
     parser.add_argument("--all", action="store_true",
@@ -1060,11 +1164,14 @@ def main():
     # Running-only filter (default ON, --all to override)
     if args.running_only and not args.all and not args.single:
         running = get_running_drivers()
-        if running is not None:
-            drivers = filter_running_drivers(drivers, running)
-            if not drivers:
-                print("No running drivers matched! Use --all to scan everything.")
-                sys.exit(1)
+        if running is None:
+            print("ERROR: Could not verify loaded drivers. Refusing to treat every "
+                  "Driver Store file as running; use --all for an intentional full-corpus scan.")
+            sys.exit(2)
+        drivers = filter_running_drivers(drivers, running)
+        if not drivers:
+            print("No running drivers matched! Use --all to scan everything.")
+            sys.exit(1)
     
     if args.max > 0:
         drivers = drivers[:args.max]
@@ -1129,7 +1236,8 @@ def main():
             # Always explain the top scorer
             top = sorted(results, key=lambda x: x.get("score", 0), reverse=True)
             # Skip INVESTIGATED for auto-explain
-            top = [r for r in top if r.get("priority") != "INVESTIGATED"]
+            top = [r for r in top
+                   if r.get("priority") != "INVESTIGATED" and not is_hardware_absent(r)]
             if top:
                 print(f"\n--- Auto-explain: top scorer ---")
                 explain_driver(results, top[0].get("driver", {}).get("name", ""))

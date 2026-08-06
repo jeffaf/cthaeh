@@ -5,9 +5,11 @@
 # Both driver_triage.py (Ghidra/Jython) and prefilter.py (CPython) load this file.
 # If this file is missing, both fall back to their hardcoded defaults.
 
-# --- Priority thresholds ---
+# --- Intrinsic research-priority thresholds ---
+# These tiers rank binaries for manual audit. They are not vulnerability,
+# exploitability, or local-exposure verdicts.
 thresholds:
-  CRITICAL: 250   # ~1.2% of drivers. Drop everything and analyze.
+  CRITICAL: 250   # Strongest manual-audit candidates; validate reachability first.
   HIGH: 150       # ~15%. Strong candidates, investigate soon.
   MEDIUM: 75      # Worth a look.
   LOW: 30         # Probably boring.
@@ -67,7 +69,8 @@ weights:
   # Internal validation (negative = FP reducer)
   has_internal_validation: -10
 
-  # Vendor context
+  # Vendor/disclosure context (weak priors, not exploitability evidence).
+  # Keep changes corpus-calibrated; CNA/bounty mainly affects reportability.
   vendor_cna_bounty: 20
   vendor_cna: 10
 
