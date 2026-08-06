@@ -8,16 +8,10 @@ path checks pure orchestrator scoring behavior without Ghidra.
 Run:
     python test_regression.py --unit
     python test_regression.py --json triage_results.json
+    python test_regression.py --canary --json triage_results.json
 
-## Canary Test Concept (TODO)
-When we have a collection of known-vulnerable driver binaries (.sys files),
-we should inject them into every scan as calibration checks:
-1. Maintain a canary/ directory with 5-10 drivers that have confirmed CVEs
-2. Before each scan, copy canaries into the scan directory
-3. After scoring, verify all canaries score CRITICAL or HIGH
-4. If any canary drifts below expected tier, scoring weights have regressed
-This catches silent regressions from weight tuning or threshold changes.
-Requires: actual .sys binaries we have rights to redistribute (or download scripts).
+Canary checks are metadata-driven. Keep canary expectations in
+canary/manifest.json, but do not commit driver binaries.
 """
 
 import json
@@ -54,6 +48,14 @@ CONFIRMED_VULNS = {
 SANITY_CHECKS = {
     "max_possible_score": 500,  # No driver should score above this
     "critical_percentage_max": 5,  # CRITICAL should be <5% of all drivers
+}
+
+TIER_ORDER = {
+    "SKIP": 0,
+    "LOW": 1,
+    "MEDIUM": 2,
+    "HIGH": 3,
+    "CRITICAL": 4,
 }
 
 
@@ -193,7 +195,40 @@ INVESTIGATEDS = load_investigated_expectations()
 
 def load_results(json_path):
     with open(json_path, "r") as f:
-        return json.load(f)
+        data = json.load(f)
+    if isinstance(data, dict):
+        return data.get("results", data.get("drivers", []))
+    return data
+
+
+def default_canary_manifest_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "canary", "manifest.json")
+
+
+def load_canary_manifest(path=None):
+    path = path or default_canary_manifest_path()
+    if not os.path.exists(path):
+        return path, []
+
+    with open(path, "r") as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        entries = data.get("canaries", [])
+    elif isinstance(data, list):
+        entries = data
+    else:
+        raise ValueError("canary manifest must be a JSON object or list")
+
+    canaries = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("canary manifest entries must be objects")
+        driver = entry.get("driver")
+        if not driver:
+            raise ValueError("canary manifest entry missing driver")
+        canaries.append(entry)
+    return path, canaries
 
 
 def find_driver(results, name):
@@ -203,6 +238,30 @@ def find_driver(results, name):
         if d.get("name", "").lower() == name_lower:
             return r
     return None
+
+
+def result_version(result):
+    driver = result.get("driver", {})
+    if driver.get("version"):
+        return driver.get("version")
+    version_info = driver.get("version_info", {})
+    return version_info.get("FileVersion", version_info.get("ProductVersion", ""))
+
+
+def finding_checks(result):
+    checks = set()
+    for finding in result.get("findings", []):
+        if isinstance(finding, dict) and finding.get("check"):
+            checks.add(finding["check"])
+        elif isinstance(finding, str):
+            checks.add(finding)
+    return checks
+
+
+def tier_meets(actual, expected):
+    if actual not in TIER_ORDER or expected not in TIER_ORDER:
+        return False
+    return TIER_ORDER[actual] >= TIER_ORDER[expected]
 
 
 def run_unit_tests():
@@ -400,6 +459,72 @@ def run_tests(results, strict_missing=False):
     return failed == 0
 
 
+def run_canary_tests(results, manifest_path=None, strict_missing=False):
+    path, canaries = load_canary_manifest(manifest_path)
+    passed = 0
+    failed = 0
+    missing = 0
+
+    print("=== Canary Regression Harness ===")
+    print(f"Manifest: {path}")
+    if not canaries:
+        print("  WARN  no canaries configured")
+        return not strict_missing
+
+    for canary in canaries:
+        name = canary["driver"]
+        expected_version = canary.get("version")
+        min_priority = canary.get("min_priority", "HIGH")
+        min_score = int(canary.get("min_score", 0))
+        expected_checks = set(canary.get("expected_checks", []))
+        result = find_driver(results, name)
+
+        if not result:
+            print(f"  WARN  {name}: missing from scan results")
+            missing += 1
+            continue
+
+        actual_version = result_version(result)
+        if expected_version and actual_version != expected_version:
+            print(f"  WARN  {name}: version mismatch {actual_version!r} != expected {expected_version!r}")
+            missing += 1
+            continue
+
+        priority = result.get("priority", "?")
+        score = int(result.get("score", 0))
+        if priority in ("INVESTIGATED", "KNOWN_FP"):
+            print(f"  WARN  {name}: {priority} override applied; raw score not evaluable")
+            missing += 1
+            continue
+
+        ok = True
+        problems = []
+        if not tier_meets(priority, min_priority):
+            ok = False
+            problems.append(f"priority {priority} below {min_priority}")
+        if score < min_score:
+            ok = False
+            problems.append(f"score {score} below {min_score}")
+
+        fired = finding_checks(result)
+        missing_checks = sorted(expected_checks - fired)
+        if missing_checks:
+            ok = False
+            problems.append("missing checks: " + ", ".join(missing_checks))
+
+        if ok:
+            print(f"  PASS  {name}: score={score} priority={priority}")
+            passed += 1
+        else:
+            print(f"  FAIL  {name}: score={score} priority={priority} ({'; '.join(problems)})")
+            failed += 1
+
+    print(f"\nCanary results: {passed} passed, {failed} failed, {missing} missing")
+    if strict_missing and missing:
+        return False
+    return failed == 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run Cthaeh scoring regression checks")
     parser.add_argument("json_path", nargs="?", default="triage_results.json",
@@ -408,6 +533,10 @@ def main():
                         help="Path to triage_results.json")
     parser.add_argument("--unit", action="store_true",
                         help="Run unit checks only, without triage_results.json")
+    parser.add_argument("--canary", action="store_true",
+                        help="Run metadata-driven canary checks from canary/manifest.json")
+    parser.add_argument("--canary-manifest", default=None,
+                        help="Path to canary manifest JSON")
     parser.add_argument("--strict-missing", action="store_true",
                         help="Fail when expected drivers are missing from scan results")
     args = parser.parse_args()
@@ -429,9 +558,16 @@ def main():
             sys.exit(1)
     
     results = load_results(json_path)
-    success = run_unit_tests()
-    print()
-    success = run_tests(results, strict_missing=args.strict_missing) and success
+    if args.canary:
+        success = run_canary_tests(
+            results,
+            manifest_path=args.canary_manifest,
+            strict_missing=args.strict_missing,
+        )
+    else:
+        success = run_unit_tests()
+        print()
+        success = run_tests(results, strict_missing=args.strict_missing) and success
     sys.exit(0 if success else 1)
 
 

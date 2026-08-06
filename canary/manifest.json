@@ -1,0 +1,46 @@
+{
+  "_schema": {
+    "purpose": "Known-vulnerable driver canaries for Cthaeh scoring regression checks.",
+    "binary_policy": "Do not commit driver binaries here. Keep only metadata, private corpus paths, or acquisition notes.",
+    "fields": {
+      "driver": "Case-insensitive .sys filename expected in triage_results.json",
+      "version": "Optional exact FileVersion/ProductVersion to pin the canary",
+      "min_priority": "Minimum expected Cthaeh tier when the driver is scored on merit",
+      "min_score": "Minimum expected raw score when the driver is scored on merit",
+      "expected_checks": "Optional check IDs expected to appear in findings",
+      "class": "Why this canary exists"
+    }
+  },
+  "canaries": [
+    {
+      "driver": "ssudbus2.sys",
+      "version": "2.21.0.0",
+      "min_priority": "HIGH",
+      "min_score": 150,
+      "expected_checks": ["has_ioctl_handler", "usb_request_forwarding"],
+      "class": "USB passthrough / weak device security",
+      "source": "investigated.json confirmed_vuln",
+      "acquisition": "Use Jeff's private analyzed sample set or reacquire from the original Samsung package; do not redistribute."
+    },
+    {
+      "driver": "AsusWmiAcpi.sys",
+      "version": null,
+      "min_priority": "HIGH",
+      "min_score": 150,
+      "expected_checks": ["wmi_method_execution"],
+      "class": "ACPI/WMI method execution surface",
+      "source": "investigated.json confirmed_vuln",
+      "acquisition": "Use Jeff's private analyzed sample set or reacquire from the matching ASUS package; do not redistribute."
+    },
+    {
+      "driver": "mtkbtfilterx.sys",
+      "version": null,
+      "min_priority": "HIGH",
+      "min_score": 150,
+      "expected_checks": ["bt_driver_crypto"],
+      "class": "Bluetooth HCI passthrough / eFuse access",
+      "source": "investigated.json confirmed_vuln",
+      "acquisition": "Use Jeff's private analyzed sample set or reacquire from the matching MediaTek/OEM package; do not redistribute."
+    }
+  ]
+}
