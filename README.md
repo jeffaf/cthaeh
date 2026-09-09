@@ -1,5 +1,11 @@
 # Cthaeh
 
+> [!IMPORTANT]
+> **Archived experimental prototype.** Cthaeh is not maintained and has not
+> been validated as a reliable end-to-end driver-ranking system. This
+> repository remains public as a research artifact. Its heuristics are search
+> hints, not vulnerability findings or evidence of exploitability.
+
 Ghidra powered triage scanner for Windows kernel drivers. Cthaeh scores `.sys`
 files across 97 vulnerability heuristics so vulnerability researchers can decide
 which drivers deserve manual reverse engineering first.
